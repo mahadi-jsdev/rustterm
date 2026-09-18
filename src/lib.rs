@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod layout;
+pub mod notify;
 pub mod pane;
 pub mod pty;
 pub mod project;
