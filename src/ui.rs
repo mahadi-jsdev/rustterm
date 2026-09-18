@@ -64,8 +64,10 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
         if pane.attention {
             title.push_str(" !");
         }
-        if pane.exited.is_some() {
-            title.push_str(" [exited]");
+        match &pane.status {
+            crate::pane::PaneStatus::Exited(code) => title.push_str(&format!(" [exited {code}]")),
+            crate::pane::PaneStatus::Failed(_) => title.push_str(" [failed]"),
+            crate::pane::PaneStatus::Running => {}
         }
         let is_active = index == project.active_pane;
         let border_style = if pane.waiting {

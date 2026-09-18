@@ -14,11 +14,17 @@ pub enum PaneEvent {
     Exited(PaneId),
 }
 
+pub enum PaneStatus {
+    Running,
+    Exited(i32),
+    Failed(String),
+}
+
 pub struct Pane {
     pub id: PaneId,
     pub title: String,
     pub parser: Arc<Mutex<vt100::Parser>>,
-    pub exited: Option<String>,
+    pub status: PaneStatus,
     pub cwd: PathBuf,
     pub color: Option<Color>,
     pub agent_tagged: bool,
@@ -74,7 +80,7 @@ impl Pane {
             id,
             title,
             parser,
-            exited: None,
+            status: PaneStatus::Running,
             cwd: cwd.map(|p| p.to_path_buf()).unwrap_or_else(|| {
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
             }),
@@ -163,6 +169,20 @@ impl Pane {
         self.child.kill()?;
         let _ = self.child.wait();
         Ok(())
+    }
+
+    /// Reap the child after the reader thread reports PTY EOF; captures the
+    /// real exit code (-1 when unavailable). Idempotent.
+    pub fn reap(&mut self) {
+        if matches!(self.status, PaneStatus::Running) {
+            // portable_pty::ExitStatus::exit_code() -> u32; -1 when wait fails.
+            let code = self.child.wait().map(|s| s.exit_code() as i32).unwrap_or(-1);
+            self.status = PaneStatus::Exited(code);
+        }
+    }
+
+    pub fn is_dead(&self) -> bool {
+        !matches!(self.status, PaneStatus::Running)
     }
 }
 
@@ -261,5 +281,34 @@ mod tests {
             }
         }
         assert!(saw_exit, "expected a PaneEvent::Exited after kill()");
+    }
+
+    #[test]
+    fn reap_captures_the_exit_code() {
+        let (tx, rx) = mpsc::channel();
+        let mut pane = Pane::spawn(1, "s".into(), 24, 80, None, tx, None).unwrap();
+        pane.write_input(b"exit 3\n").unwrap();
+        // Wait for the reader thread to report PTY EOF.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut saw_exit = false;
+        while Instant::now() < deadline && !saw_exit {
+            if let Ok(PaneEvent::Exited(_)) = rx.recv_timeout(Duration::from_millis(200)) {
+                saw_exit = true;
+            }
+        }
+        assert!(saw_exit, "pane never reported exit");
+        pane.reap();
+        assert!(matches!(pane.status, PaneStatus::Exited(3)));
+    }
+
+    #[test]
+    fn is_dead_reflects_status() {
+        let (tx, _rx) = mpsc::channel();
+        let mut pane = Pane::spawn(1, "s".into(), 24, 80, None, tx, None).unwrap();
+        assert!(!pane.is_dead());
+        pane.status = PaneStatus::Exited(0);
+        assert!(pane.is_dead());
+        pane.status = PaneStatus::Failed("boom".into());
+        assert!(pane.is_dead());
     }
 }

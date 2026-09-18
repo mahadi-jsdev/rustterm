@@ -86,7 +86,7 @@ fn run(
                 for project in app.projects.iter_mut() {
                     for pane in project.panes.iter_mut() {
                         if pane.id == id {
-                            pane.exited = Some("exited".to_string());
+                            pane.reap();
                             pane.waiting = false;
                             pane.running = false;
                         }
@@ -101,7 +101,7 @@ fn run(
             let mut pending = Vec::new();
             for project in app.projects.iter_mut() {
                 for pane in project.panes.iter_mut() {
-                    if pane.exited.is_some() {
+                    if pane.is_dead() {
                         continue;
                     }
                     let text = match pane.parser.lock() {
