@@ -3,7 +3,63 @@ use crate::keys::key_event_to_bytes;
 use crate::notify;
 use crate::palette::{self, Palette};
 use crate::text_input::{EditResult, LineEdit};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
+
+const SCROLL_LINES: usize = 3;
+
+/// Route a mouse event. Wheel events scroll the scrollback of the pane
+/// under the cursor — unless that pane's app enabled mouse reporting,
+/// in which case they're forwarded to the PTY in its requested encoding.
+pub fn handle_mouse(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
+    let up = match mouse.kind {
+        MouseEventKind::ScrollUp => true,
+        MouseEventKind::ScrollDown => false,
+        _ => return,
+    };
+    let Some(project) = app.active_project_mut() else {
+        return;
+    };
+    let (_, main, _) = crate::layout::frame_areas(frame_area);
+    let rects = crate::layout::pane_rects(main, project.panes.len(), project.col_split, project.row_split);
+    let pos = Position::new(mouse.column, mouse.row);
+    let Some((pane, rect)) = project
+        .panes
+        .iter()
+        .zip(rects.iter())
+        .find(|(_, r)| r.contains(pos))
+    else {
+        return;
+    };
+    if pane.mouse_reporting() {
+        // Forward only when the cursor is on a real app cell (inside the
+        // border); coords are 1-based relative to the pane's inner area.
+        let inner_right = rect.x + rect.width.saturating_sub(1);
+        let inner_bottom = rect.y + rect.height.saturating_sub(1);
+        if mouse.column > rect.x && mouse.column < inner_right
+            && mouse.row > rect.y && mouse.row < inner_bottom
+        {
+            let x = mouse.column - rect.x;
+            let y = mouse.row - rect.y;
+            let _ = pane.write_input(&wheel_bytes(up, x, y, pane.mouse_sgr_encoding()));
+        }
+    } else if up {
+        pane.scroll_up(SCROLL_LINES);
+    } else {
+        pane.scroll_down(SCROLL_LINES);
+    }
+}
+
+/// Encode a wheel event for a pane whose app enabled mouse reporting:
+/// SGR (1006) `\x1b[<btn;x;yM`, or legacy X10 `\x1b[M` + three +32 bytes.
+fn wheel_bytes(up: bool, x: u16, y: u16, sgr: bool) -> Vec<u8> {
+    let btn: u8 = if up { 64 } else { 65 };
+    if sgr {
+        format!("\x1b[<{btn};{x};{y}M").into_bytes()
+    } else {
+        vec![0x1b, b'[', b'M', btn + 32, (x.min(223) as u8) + 32, (y.min(223) as u8) + 32]
+    }
+}
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     match app.mode {
@@ -17,6 +73,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 if let Some(pane) = project.active_pane_mut() {
                     let bytes = key_event_to_bytes(key);
                     if !bytes.is_empty() {
+                        pane.scroll_to_bottom();
                         for e in pane.watcher.on_input(&bytes) {
                             pending.push((pane.id, e));
                         }
@@ -286,5 +343,92 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
         let pane = &app.active_project().unwrap().panes[0];
         assert_eq!(pane.watcher.last_command(), "ls");
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn pane_scrollback(app: &App) -> usize {
+        app.active_project().unwrap().panes[0]
+            .parser
+            .lock()
+            .unwrap()
+            .screen()
+            .scrollback()
+    }
+
+    fn grow_scrollback(app: &App) {
+        let pane = &app.active_project().unwrap().panes[0];
+        let mut p = pane.parser.lock().unwrap();
+        for _ in 0..40 {
+            p.process(b"line\r\n");
+        }
+    }
+
+    #[test]
+    fn wheel_bytes_encodes_sgr_and_legacy() {
+        assert_eq!(wheel_bytes(true, 5, 7, true), b"\x1b[<64;5;7M".to_vec());
+        assert_eq!(wheel_bytes(false, 5, 7, true), b"\x1b[<65;5;7M".to_vec());
+        assert_eq!(
+            wheel_bytes(true, 5, 7, false),
+            vec![0x1b, b'[', b'M', 96, 37, 39]
+        );
+    }
+
+    #[test]
+    fn wheel_scrolls_the_pane_under_the_cursor() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        grow_scrollback(&app);
+        let frame = Rect::new(0, 0, 80, 24);
+        // A single pane fills the main area (right of the 24-col sidebar).
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 10), frame);
+        assert_eq!(pane_scrollback(&app), SCROLL_LINES);
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 10), frame);
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 40, 10), frame);
+        assert_eq!(pane_scrollback(&app), SCROLL_LINES);
+    }
+
+    #[test]
+    fn wheel_over_sidebar_or_status_bar_does_not_scroll() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        grow_scrollback(&app);
+        let frame = Rect::new(0, 0, 80, 24);
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 5, 10), frame); // sidebar
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 23), frame); // status row
+        assert_eq!(pane_scrollback(&app), 0);
+    }
+
+    #[test]
+    fn wheel_is_forwarded_when_the_pane_app_reports_mouse() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            // App enables SGR mouse reporting; wheel events then go to the
+            // PTY and must not move the local scrollback offset.
+            pane.parser.lock().unwrap().process(b"\x1b[?1006h\x1b[?1000h");
+        }
+        grow_scrollback(&app);
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 10), Rect::new(0, 0, 80, 24));
+        assert_eq!(pane_scrollback(&app), 0);
+    }
+
+    #[test]
+    fn typing_snaps_pane_back_to_live_view() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        grow_scrollback(&app);
+        app.active_project().unwrap().panes[0].scroll_up(5);
+        assert_eq!(pane_scrollback(&app), 5);
+        handle_key(&mut app, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(pane_scrollback(&app), 0);
     }
 }

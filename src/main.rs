@@ -35,7 +35,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut terminal = ratatui::init();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
     let result = run(&mut terminal, &mut app, &events_rx);
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -63,10 +65,19 @@ fn run(
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         if crossterm::event::poll(Duration::from_millis(50))? {
-            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                if key.kind == crossterm::event::KeyEventKind::Press {
-                    input::handle_key(app, key);
+            match crossterm::event::read()? {
+                crossterm::event::Event::Key(key) => {
+                    if key.kind == crossterm::event::KeyEventKind::Press {
+                        input::handle_key(app, key);
+                    }
                 }
+                crossterm::event::Event::Mouse(mouse) => {
+                    if let Ok(size) = terminal.size() {
+                        let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+                        input::handle_mouse(app, mouse, area);
+                    }
+                }
+                _ => {}
             }
         }
 

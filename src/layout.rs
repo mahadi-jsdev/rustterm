@@ -2,6 +2,20 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 const GUTTER: u16 = 1;
 
+/// (sidebar, pane-grid, status-bar) regions of a frame. Rendering and
+/// mouse hit-testing share this so they always agree on pane positions.
+pub fn frame_areas(area: Rect) -> (Rect, Rect, Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(24), Constraint::Min(0)])
+        .split(rows[0]);
+    (cols[0], cols[1], rows[1])
+}
+
 pub fn pane_rects(area: Rect, count: usize, col_split: f32, row_split: f32) -> Vec<Rect> {
     match count {
         0 => Vec::new(),

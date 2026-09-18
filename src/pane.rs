@@ -102,6 +102,49 @@ impl Pane {
         Ok(())
     }
 
+    /// Scroll the view `n` rows up into scrollback history. vt100 clamps
+    /// the offset to the available scrollback; 0 is the live view.
+    pub fn scroll_up(&self, n: usize) {
+        if let Ok(mut p) = self.parser.lock() {
+            let s = p.screen_mut();
+            let pos = s.scrollback().saturating_add(n);
+            s.set_scrollback(pos);
+        }
+    }
+
+    pub fn scroll_down(&self, n: usize) {
+        if let Ok(mut p) = self.parser.lock() {
+            let s = p.screen_mut();
+            let pos = s.scrollback().saturating_sub(n);
+            s.set_scrollback(pos);
+        }
+    }
+
+    /// Snap back to the live view — called on input so typing never
+    /// leaves the user looking at scrollback.
+    pub fn scroll_to_bottom(&self) {
+        if let Ok(mut p) = self.parser.lock() {
+            p.screen_mut().set_scrollback(0);
+        }
+    }
+
+    /// Whether the app in this pane enabled xterm mouse reporting — if
+    /// so, wheel events are forwarded to it instead of scrolling locally.
+    pub fn mouse_reporting(&self) -> bool {
+        self.parser
+            .lock()
+            .map(|p| p.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None)
+            .unwrap_or(false)
+    }
+
+    /// Whether the app asked for SGR (1006) encoding vs. legacy X10.
+    pub fn mouse_sgr_encoding(&self) -> bool {
+        self.parser
+            .lock()
+            .map(|p| p.screen().mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Sgr)
+            .unwrap_or(true)
+    }
+
     pub fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
         if self.parser.lock().unwrap().screen().size() == (rows, cols) {
             return Ok(());
@@ -156,6 +199,30 @@ mod tests {
             drain_until(&rx, &pane.parser, "rustterm-pane-ok", Duration::from_secs(3)),
             "expected 'rustterm-pane-ok' to appear in the parsed screen"
         );
+    }
+
+    #[test]
+    fn scroll_offsets_move_through_scrollback_and_clamp() {
+        let (tx, _rx) = mpsc::channel();
+        let pane = Pane::spawn(1, "s".into(), 5, 20, None, tx, None).unwrap();
+        {
+            let mut p = pane.parser.lock().unwrap();
+            for _ in 0..40 {
+                p.process(b"line\r\n");
+            }
+        }
+        let offset = || pane.parser.lock().unwrap().screen().scrollback();
+        pane.scroll_up(3);
+        assert_eq!(offset(), 3);
+        pane.scroll_up(10_000); // clamps at the scrollback size
+        let clamped = offset();
+        assert!(clamped >= 35, "expected deep scrollback, got {clamped}");
+        pane.scroll_down(4);
+        assert_eq!(offset(), clamped - 4);
+        pane.scroll_to_bottom();
+        assert_eq!(offset(), 0);
+        pane.scroll_down(10); // already at live view — stays
+        assert_eq!(offset(), 0);
     }
 
     #[test]

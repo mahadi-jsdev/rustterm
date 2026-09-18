@@ -1,5 +1,5 @@
 use crate::app::{App, InputMode};
-use crate::layout::pane_rects;
+use crate::layout::{frame_areas, pane_rects};
 use crate::pane::Pane;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,19 +10,7 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(area);
-    let body_area = rows[0];
-    let status_area = rows[1];
-
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(24), Constraint::Min(0)])
-        .split(body_area);
-    let sidebar_area = cols[0];
-    let main_area = cols[1];
+    let (sidebar_area, main_area, status_area) = frame_areas(area);
 
     draw_sidebar(frame, app, sidebar_area);
     draw_panes(frame, app, main_area);
