@@ -164,16 +164,21 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_palette(frame: &mut Frame, app: &App) {
     let Some(pal) = app.palette.as_ref() else { return };
     let area = frame.area();
-    let width = (area.width * 3 / 5).clamp(30, area.width);
+    // 3/5 of the screen but ≥30 cols; the clamp min is capped at area.width
+    // because clamp() panics when min > max (e.g. a 20-col terminal).
+    let width = (area.width * 3 / 5).clamp(30.min(area.width), area.width);
     // Height fits the filtered command count (border×2 + query row + items)
     // rather than the spec's fixed 14: on machines with agent CLIs on PATH,
     // "Run <agent>" entries push "Quit" past a 14-row overlay's visible rows.
+    // Capped at area.height - y (after the 6-row floor) so the rect's bottom
+    // edge stays on-screen given the y = h/6 top offset.
+    let y = area.height / 6;
     let height = (pal.filtered().len() as u16 + 3)
-        .min(area.height.saturating_sub(2))
-        .max(6);
+        .max(6)
+        .min(area.height.saturating_sub(y));
     let rect = Rect {
         x: (area.width - width) / 2,
-        y: area.height / 6,
+        y,
         width,
         height,
     };
@@ -315,6 +320,27 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert!(buffer_contains(buffer, "New pane"));
         assert!(buffer_contains(buffer, "Quit"));
+    }
+
+    #[test]
+    fn palette_rect_stays_on_screen_on_tiny_terminal() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(tx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.mode = crate::app::InputMode::Palette;
+        app.palette = Some(crate::palette::Palette::open(&app));
+
+        // 20 cols is below the 30-col minimum width: the width clamp must not
+        // panic, and the palette's bottom edge must land inside the buffer.
+        let backend = TestBackend::new(20, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let last_row = buffer.area.height - 1;
+        let bottom_edge_on_screen = (0..buffer.area.width)
+            .any(|x| buffer[(x, last_row)].symbol() == "└");
+        assert!(bottom_edge_on_screen);
     }
 
     #[test]
