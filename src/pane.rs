@@ -34,6 +34,7 @@ pub struct Pane {
     pub last_notify_at: Option<Instant>,
     pub watcher: Watcher,
     pub startup_command: Option<String>,
+    pub search: Option<crate::search::SearchState>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -92,6 +93,7 @@ impl Pane {
             last_notify_at: None,
             watcher: Watcher::new(),
             startup_command: startup_command.map(String::from),
+            search: None,
             writer: spawned.writer,
             master: spawned.master,
             child: spawned.child,
@@ -131,6 +133,14 @@ impl Pane {
     pub fn scroll_to_bottom(&self) {
         if let Ok(mut p) = self.parser.lock() {
             p.screen_mut().set_scrollback(0);
+        }
+    }
+
+    /// Absolute scroll offset — 0 is the live view; vt100 clamps to
+    /// the available scrollback.
+    pub fn set_scroll(&self, off: usize) {
+        if let Ok(mut p) = self.parser.lock() {
+            p.screen_mut().set_scrollback(off);
         }
     }
 
