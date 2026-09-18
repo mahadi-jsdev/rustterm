@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     match app.mode {
         InputMode::Normal => {
-            if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 app.mode = InputMode::Leader;
                 return;
             }
@@ -103,16 +103,16 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_b_enters_leader_mode() {
+    fn ctrl_a_enters_leader_mode() {
         let mut app = app_with_one_project();
-        handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert!(matches!(app.mode, InputMode::Leader));
     }
 
     #[test]
     fn leader_then_q_sets_should_quit() {
         let mut app = app_with_one_project();
-        handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(app.should_quit);
         assert!(matches!(app.mode, InputMode::Normal), "mode should revert after a leader command");
@@ -123,7 +123,7 @@ mod tests {
         let mut app = app_with_one_project();
         app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
 
-        handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char(']'), KeyModifiers::NONE));
         assert_eq!(app.active_project, 1);
     }
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn leader_then_n_spawns_a_pane_in_the_active_project() {
         let mut app = app_with_one_project();
-        handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('n'), KeyModifiers::NONE));
 
         let project = app.active_project().unwrap();
@@ -142,11 +142,11 @@ mod tests {
     #[test]
     fn leader_then_x_closes_the_active_pane() {
         let mut app = app_with_one_project();
-        handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('n'), KeyModifiers::NONE));
         assert_eq!(app.active_project().unwrap().panes.len(), 1);
 
-        handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('x'), KeyModifiers::NONE));
         assert_eq!(app.active_project().unwrap().panes.len(), 0);
     }

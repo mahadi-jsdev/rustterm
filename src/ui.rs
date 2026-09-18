@@ -90,7 +90,7 @@ fn sync_pane_size(pane: &Pane, rect: Rect) {
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let text = match app.mode {
-        crate::app::InputMode::Normal => "Ctrl+B for commands".to_string(),
+        crate::app::InputMode::Normal => "Ctrl+A for commands".to_string(),
         crate::app::InputMode::Leader => "n new  x close  h/l switch  [ ] project  +/- split  q quit".to_string(),
     };
     frame.render_widget(Paragraph::new(text), area);
