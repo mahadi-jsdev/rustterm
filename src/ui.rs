@@ -9,16 +9,24 @@ use tui_term::widget::PseudoTerminal;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+    let body_area = rows[0];
+    let status_area = rows[1];
+
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(24), Constraint::Min(0)])
-        .split(area);
+        .split(body_area);
     let sidebar_area = cols[0];
     let main_area = cols[1];
 
     draw_sidebar(frame, app, sidebar_area);
     draw_panes(frame, app, main_area);
-    draw_status_bar(frame, app, Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1));
+    draw_status_bar(frame, app, status_area);
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
