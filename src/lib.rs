@@ -6,3 +6,4 @@ pub mod app;
 pub mod keys;
 pub mod input;
 pub mod ui;
+pub mod watcher;
