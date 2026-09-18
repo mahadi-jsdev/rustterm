@@ -3,3 +3,4 @@ pub mod pane;
 pub mod pty;
 pub mod project;
 pub mod app;
+pub mod keys;
