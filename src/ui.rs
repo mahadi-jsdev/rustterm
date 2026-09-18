@@ -27,11 +27,6 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, project)| {
-            let style = if i == app.active_project {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
             let badge = if project.panes.iter().any(|p| p.waiting) {
                 " ●"
             } else if project.panes.iter().any(|p| p.attention) {
@@ -39,7 +34,14 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 ""
             };
-            ListItem::new(format!("{}{}", project.name, badge)).style(style)
+            if i == app.active_project {
+                let style = Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+                ListItem::new(format!("▸ {}{}", project.name, badge)).style(style)
+            } else {
+                ListItem::new(format!("  {}{}", project.name, badge))
+            }
         })
         .collect();
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Projects"));
@@ -246,6 +248,25 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert!(buffer_contains(buffer, "alpha"));
         assert!(buffer_contains(buffer, "beta"));
+    }
+
+    #[test]
+    fn active_project_row_is_highlighted() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(tx);
+        app.projects.push(Project::new("alpha".into(), PathBuf::from("/tmp")));
+        app.projects.push(Project::new("beta".into(), PathBuf::from("/tmp")));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let marker = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| buffer[(x, y)].symbol() == "▸")
+            .expect("active project marker not rendered");
+        assert!(buffer[marker].modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
