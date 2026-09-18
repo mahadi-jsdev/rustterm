@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod ai_commit;
 pub mod completion;
 pub mod git;
 pub mod search;
