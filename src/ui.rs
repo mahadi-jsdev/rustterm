@@ -1,9 +1,9 @@
-use crate::app::App;
+use crate::app::{App, InputMode};
 use crate::layout::pane_rects;
 use crate::pane::Pane;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
@@ -27,6 +27,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_sidebar(frame, app, sidebar_area);
     draw_panes(frame, app, main_area);
     draw_status_bar(frame, app, status_area);
+
+    if matches!(app.mode, InputMode::Palette) {
+        draw_palette(frame, app);
+    }
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
@@ -40,7 +44,14 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default()
             };
-            ListItem::new(project.name.clone()).style(style)
+            let badge = if project.panes.iter().any(|p| p.waiting) {
+                " ●"
+            } else if project.panes.iter().any(|p| p.attention) {
+                " !"
+            } else {
+                ""
+            };
+            ListItem::new(format!("{}{}", project.name, badge)).style(style)
         })
         .collect();
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Projects"));
@@ -54,14 +65,25 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
     let rects = pane_rects(area, project.panes.len(), project.col_split, project.row_split);
     for (index, (pane, rect)) in project.panes.iter().zip(rects.iter()).enumerate() {
         sync_pane_size(pane, *rect);
-        let title = if pane.exited.is_some() {
-            format!("{} [exited]", pane.title)
-        } else {
-            pane.title.clone()
-        };
+        let mut title = pane.title.clone();
+        if pane.waiting {
+            title.push_str(" ●");
+        } else if pane.running {
+            title.push_str(" ▸");
+        }
+        if pane.attention {
+            title.push_str(" !");
+        }
+        if pane.exited.is_some() {
+            title.push_str(" [exited]");
+        }
         let is_active = index == project.active_pane;
-        let border_style = if is_active {
+        let border_style = if pane.waiting {
+            Style::default().fg(Color::Yellow)
+        } else if is_active {
             Style::default().fg(Color::Cyan)
+        } else if let Some(c) = pane.color {
+            Style::default().fg(c)
         } else {
             Style::default()
         };
@@ -89,19 +111,99 @@ fn sync_pane_size(pane: &Pane, rect: Rect) {
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let text = match app.mode {
-        crate::app::InputMode::Normal => "Ctrl+A for commands".to_string(),
-        crate::app::InputMode::Leader => "n new  x close  h/l switch  [ ] project  +/- split  q quit".to_string(),
-        // Palette and LineInput rendering is owned by a later task; these are
-        // placeholders so the status bar still draws something sensible.
-        crate::app::InputMode::Palette => "command palette".to_string(),
-        crate::app::InputMode::LineInput(_) => app
-            .line_input
-            .as_ref()
-            .map(|edit| edit.as_str().to_string())
-            .unwrap_or_default(),
+    let fresh_flash = app
+        .status_msg
+        .as_ref()
+        .filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(3));
+    let text = if let Some((msg, _)) = fresh_flash {
+        msg.clone()
+    } else {
+        match app.mode {
+            InputMode::Normal => {
+                let state = app
+                    .active_project()
+                    .and_then(|p| p.active_pane())
+                    .map(|p| {
+                        if p.waiting {
+                            "  ● waiting for input"
+                        } else if p.running {
+                            "  ▸ running"
+                        } else {
+                            ""
+                        }
+                    })
+                    .unwrap_or("");
+                format!("Ctrl+A for commands{state}")
+            }
+            InputMode::Leader => {
+                "n new  x close  h/l switch  [ ] project  +/- split  : palette  c add-project  q quit"
+                    .to_string()
+            }
+            InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),
+            InputMode::LineInput(purpose) => {
+                let label = match purpose {
+                    crate::app::LinePurpose::AddProject => "Add project: ",
+                    crate::app::LinePurpose::RenamePane => "Rename pane: ",
+                };
+                let (buf, err) = app
+                    .line_input
+                    .as_ref()
+                    .map(|e| (e.as_str(), e.error().unwrap_or("")))
+                    .unwrap_or(("", ""));
+                if err.is_empty() {
+                    format!("{label}{buf}█")
+                } else {
+                    format!("{label}{buf}█  — {err}")
+                }
+            }
+        }
     };
     frame.render_widget(Paragraph::new(text), area);
+}
+
+fn draw_palette(frame: &mut Frame, app: &App) {
+    let Some(pal) = app.palette.as_ref() else { return };
+    let area = frame.area();
+    let width = (area.width * 3 / 5).clamp(30, area.width);
+    // Height fits the filtered command count (border×2 + query row + items)
+    // rather than the spec's fixed 14: on machines with agent CLIs on PATH,
+    // "Run <agent>" entries push "Quit" past a 14-row overlay's visible rows.
+    let height = (pal.filtered().len() as u16 + 3)
+        .min(area.height.saturating_sub(2))
+        .max(6);
+    let rect = Rect {
+        x: (area.width - width) / 2,
+        y: area.height / 6,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, rect);
+    let block = Block::default().borders(Borders::ALL).title("Command");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    frame.render_widget(Paragraph::new(format!("> {}", pal.query)), rows[0]);
+
+    let visible = rows[1].height as usize;
+    let items: Vec<ListItem> = pal
+        .filtered()
+        .iter()
+        .enumerate()
+        .take(visible)
+        .map(|(i, c)| {
+            let style = if i == pal.selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(c.label.clone()).style(style)
+        })
+        .collect();
+    frame.render_widget(List::new(items), rows[1]);
 }
 
 #[cfg(test)]
@@ -169,5 +271,63 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn waiting_pane_shows_dot_in_title() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(tx);
+        let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
+        let (ptx, _prx) = mpsc::channel();
+        let mut pane = Pane::spawn(1, "work".into(), 24, 80, None, ptx, None).unwrap();
+        pane.waiting = true;
+        project.panes.push(pane);
+        app.projects.push(project);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        assert!(buffer_contains(terminal.backend().buffer(), "work ●"));
+    }
+
+    #[test]
+    fn status_flash_replaces_hint_text() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(tx);
+        app.flash("can't close the last project");
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        assert!(buffer_contains(terminal.backend().buffer(), "can't close the last project"));
+    }
+
+    #[test]
+    fn palette_overlay_lists_matching_commands() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(tx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.mode = crate::app::InputMode::Palette;
+        app.palette = Some(crate::palette::Palette::open(&app));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(buffer_contains(buffer, "New pane"));
+        assert!(buffer_contains(buffer, "Quit"));
+    }
+
+    #[test]
+    fn line_input_prompt_shows_buffer() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(tx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.mode = crate::app::InputMode::LineInput(crate::app::LinePurpose::AddProject);
+        app.line_input = Some(crate::text_input::LineEdit::from_str("/tmp/fo"));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        assert!(buffer_contains(terminal.backend().buffer(), "/tmp/fo"));
     }
 }
