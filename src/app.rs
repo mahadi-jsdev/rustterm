@@ -448,3 +448,8 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     }
     PathBuf::from(path)
 }
+
+/// Single-quote a path for embedding in a shell command line.
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
