@@ -199,7 +199,8 @@ mod tests {
 
     fn app_with_projects(names: &[&str]) -> App {
         let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
         for n in names {
             app.projects.push(Project::new((*n).into(), PathBuf::from("/tmp")));
         }

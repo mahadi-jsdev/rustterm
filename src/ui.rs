@@ -132,10 +132,16 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),
+            // Placeholder hints — real per-mode status text lands with Task 8.
+            InputMode::Sidebar => "git sidebar".to_string(),
+            InputMode::Finder => "file finder".to_string(),
+            InputMode::Search => "search".to_string(),
             InputMode::LineInput(purpose) => {
                 let label = match purpose {
                     crate::app::LinePurpose::AddProject => "Add project: ",
                     crate::app::LinePurpose::RenamePane => "Rename pane: ",
+                    crate::app::LinePurpose::CommitMsg => "Commit message: ",
+                    crate::app::LinePurpose::Search => "Search: ",
                 };
                 let Some(edit) = app.line_input.as_ref() else {
                     return;
@@ -223,6 +229,15 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::mpsc;
 
+    /// Senders for both app channels; the receivers are dropped — pane/app
+    /// event sends are all `let _ =`, so tests need only the sender half.
+    fn two_channels() -> (
+        mpsc::Sender<crate::pane::PaneEvent>,
+        mpsc::Sender<crate::app::AppEvent>,
+    ) {
+        (mpsc::channel().0, mpsc::channel().0)
+    }
+
     fn buffer_contains(buffer: &Buffer, needle: &str) -> bool {
         for y in 0..buffer.area.height {
             let mut row = String::new();
@@ -238,8 +253,8 @@ mod tests {
 
     #[test]
     fn sidebar_shows_project_names() {
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
         app.projects.push(Project::new("alpha".into(), PathBuf::from("/tmp")));
         app.projects.push(Project::new("beta".into(), PathBuf::from("/tmp")));
 
@@ -254,8 +269,8 @@ mod tests {
 
     #[test]
     fn active_project_row_is_highlighted() {
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
         app.projects.push(Project::new("alpha".into(), PathBuf::from("/tmp")));
         app.projects.push(Project::new("beta".into(), PathBuf::from("/tmp")));
 
@@ -273,8 +288,8 @@ mod tests {
 
     #[test]
     fn active_pane_title_is_rendered_as_a_block_title() {
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
         let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
         let (pane_tx, _pane_rx) = mpsc::channel();
         let pane = Pane::spawn(1, "my-pane-title".into(), 24, 80, None, pane_tx, None).unwrap();
@@ -291,8 +306,8 @@ mod tests {
 
     #[test]
     fn draw_with_no_projects_does_not_panic() {
-        let (tx, _rx) = mpsc::channel();
-        let app = App::new(tx);
+        let (tx, atx) = two_channels();
+        let app = App::new(tx, atx);
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &app)).unwrap();
@@ -300,8 +315,8 @@ mod tests {
 
     #[test]
     fn waiting_pane_shows_dot_in_title() {
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
         let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
         let (ptx, _prx) = mpsc::channel();
         let mut pane = Pane::spawn(1, "work".into(), 24, 80, None, ptx, None).unwrap();
@@ -317,8 +332,8 @@ mod tests {
 
     #[test]
     fn status_flash_replaces_hint_text() {
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
         app.flash("can't close the last project");
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -328,8 +343,8 @@ mod tests {
 
     #[test]
     fn palette_overlay_lists_matching_commands() {
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.mode = crate::app::InputMode::Palette;
         app.palette = Some(crate::palette::Palette::open(&app));
@@ -344,8 +359,8 @@ mod tests {
 
     #[test]
     fn palette_rect_stays_on_screen_on_tiny_terminal() {
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.mode = crate::app::InputMode::Palette;
         app.palette = Some(crate::palette::Palette::open(&app));
@@ -365,8 +380,8 @@ mod tests {
 
     #[test]
     fn line_input_shows_completion_hints() {
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.mode = crate::app::InputMode::LineInput(crate::app::LinePurpose::AddProject);
         let mut edit = crate::text_input::LineEdit::from_str("/tmp/fo");
@@ -381,8 +396,8 @@ mod tests {
 
     #[test]
     fn line_input_prompt_shows_buffer() {
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.mode = crate::app::InputMode::LineInput(crate::app::LinePurpose::AddProject);
         app.line_input = Some(crate::text_input::LineEdit::from_str("/tmp/fo"));

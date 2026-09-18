@@ -159,6 +159,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             }
         }
+        // Placeholder — sidebar/finder/search key wiring lands in Task 7.
+        InputMode::Sidebar | InputMode::Finder | InputMode::Search => {}
         InputMode::LineInput(purpose) => {
             let Some(edit) = app.line_input.as_mut() else {
                 app.mode = InputMode::Normal;
@@ -208,6 +210,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                         app.line_input = None;
                         app.mode = InputMode::Normal;
                     }
+                    // Placeholder — CommitMsg/Search submit handling is Task 7.
+                    LinePurpose::CommitMsg | LinePurpose::Search => {}
                 },
             }
         }
@@ -223,7 +227,8 @@ mod tests {
 
     fn app_with_one_project() -> App {
         let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app
     }

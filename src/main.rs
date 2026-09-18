@@ -8,9 +8,12 @@ use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::channel::<PaneEvent>();
+    // AppEvent channel — the receiver is drained in the run loop once the
+    // git-poll / AI-message dispatch lands (Task 9).
+    let (app_tx, _app_rx) = mpsc::channel::<rustterm::app::AppEvent>();
 
     let roots = project_roots_from_args();
-    let mut app = App::new(events_tx.clone());
+    let mut app = App::new(events_tx.clone(), app_tx.clone());
     for root in &roots {
         let name = root
             .file_name()
