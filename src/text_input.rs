@@ -9,19 +9,27 @@ pub enum EditResult {
 pub struct LineEdit {
     buf: String,
     error: Option<String>,
+    /// Completion hints the caller maintains (e.g. directory names for the
+    /// add-project prompt); rendered by the status bar. Unused for plain
+    /// text prompts like rename.
+    pub suggestions: Vec<String>,
 }
 
 impl LineEdit {
     pub fn new() -> LineEdit {
-        LineEdit { buf: String::new(), error: None }
+        LineEdit { buf: String::new(), error: None, suggestions: Vec::new() }
     }
 
     pub fn from_str(s: &str) -> LineEdit {
-        LineEdit { buf: s.to_string(), error: None }
+        LineEdit { buf: s.to_string(), error: None, suggestions: Vec::new() }
     }
 
     pub fn as_str(&self) -> &str {
         &self.buf
+    }
+
+    pub fn set_text(&mut self, s: String) {
+        self.buf = s;
     }
 
     pub fn error(&self) -> Option<&str> {

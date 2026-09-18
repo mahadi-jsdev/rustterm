@@ -110,7 +110,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     app.mode = InputMode::Palette;
                 }
                 KeyCode::Char('c') => {
-                    app.line_input = Some(LineEdit::new());
+                    let mut edit = LineEdit::new();
+                    edit.suggestions = crate::completion::dir_candidates("");
+                    app.line_input = Some(edit);
                     app.mode = InputMode::LineInput(LinePurpose::AddProject);
                 }
                 _ => {}
@@ -162,7 +164,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 app.mode = InputMode::Normal;
                 return;
             };
-            match edit.handle_key(key) {
+            if key.code == KeyCode::Tab && matches!(purpose, LinePurpose::AddProject) {
+                let mut buf = edit.as_str().to_string();
+                crate::completion::complete(&mut buf);
+                edit.set_text(buf);
+                edit.suggestions = crate::completion::dir_candidates(edit.as_str());
+                return;
+            }
+            let result = edit.handle_key(key);
+            if matches!(purpose, LinePurpose::AddProject) && matches!(result, EditResult::Editing) {
+                edit.suggestions = crate::completion::dir_candidates(edit.as_str());
+            }
+            match result {
                 EditResult::Editing => {}
                 EditResult::Cancel => {
                     app.line_input = None;
@@ -419,6 +432,54 @@ mod tests {
         grow_scrollback(&app);
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 10), Rect::new(0, 0, 80, 24));
         assert_eq!(pane_scrollback(&app), 0);
+    }
+
+    #[test]
+    fn tab_completes_unique_dir_and_descends() {
+        let root = std::env::temp_dir().join(format!("rustterm-input-compl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("projapp/src")).unwrap();
+        std::fs::create_dir_all(root.join("other")).unwrap();
+
+        let mut app = app_with_one_project();
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('c'), KeyModifiers::NONE));
+        for c in format!("{}/proj", root.display()).chars() {
+            handle_key(&mut app, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut app, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.line_input.as_ref().unwrap().as_str(),
+            format!("{}/projapp/", root.display())
+        );
+        // Descend: suggestions now list projapp's subdirs.
+        assert_eq!(app.line_input.as_ref().unwrap().suggestions, vec!["src"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn tab_on_ambiguous_prefix_extends_to_common_prefix() {
+        let root = std::env::temp_dir().join(format!("rustterm-input-amb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("alpha")).unwrap();
+        std::fs::create_dir_all(root.join("alpine")).unwrap();
+
+        let mut app = app_with_one_project();
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('c'), KeyModifiers::NONE));
+        for c in format!("{}/al", root.display()).chars() {
+            handle_key(&mut app, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut app, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.line_input.as_ref().unwrap().as_str(),
+            format!("{}/alp", root.display())
+        );
+        assert_eq!(
+            app.line_input.as_ref().unwrap().suggestions,
+            vec!["alpha", "alpine"]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

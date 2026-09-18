@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod completion;
 pub mod layout;
 pub mod notify;
 pub mod palette;

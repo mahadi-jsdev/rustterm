@@ -133,15 +133,24 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     crate::app::LinePurpose::AddProject => "Add project: ",
                     crate::app::LinePurpose::RenamePane => "Rename pane: ",
                 };
-                let (buf, err) = app
-                    .line_input
-                    .as_ref()
-                    .map(|e| (e.as_str(), e.error().unwrap_or("")))
-                    .unwrap_or(("", ""));
-                if err.is_empty() {
-                    format!("{label}{buf}█")
-                } else {
+                let Some(edit) = app.line_input.as_ref() else {
+                    return;
+                };
+                let buf = edit.as_str();
+                if let Some(err) = edit.error() {
                     format!("{label}{buf}█  — {err}")
+                } else if !edit.suggestions.is_empty() {
+                    let shown = edit
+                        .suggestions
+                        .iter()
+                        .take(5)
+                        .map(|n| format!("{n}/"))
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    let more = if edit.suggestions.len() > 5 { "  …" } else { "" };
+                    format!("{label}{buf}█    {shown}{more}")
+                } else {
+                    format!("{label}{buf}█")
                 }
             }
         }
@@ -329,6 +338,22 @@ mod tests {
         let bottom_edge_on_screen = (0..buffer.area.width)
             .any(|x| buffer[(x, last_row)].symbol() == "└");
         assert!(bottom_edge_on_screen);
+    }
+
+    #[test]
+    fn line_input_shows_completion_hints() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(tx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.mode = crate::app::InputMode::LineInput(crate::app::LinePurpose::AddProject);
+        let mut edit = crate::text_input::LineEdit::from_str("/tmp/fo");
+        edit.suggestions = vec!["foo".into(), "foobar".into()];
+        app.line_input = Some(edit);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        assert!(buffer_contains(terminal.backend().buffer(), "foo/  foobar/"));
     }
 
     #[test]
