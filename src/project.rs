@@ -26,6 +26,10 @@ impl Project {
         self.panes.get(self.active_pane)
     }
 
+    pub fn active_pane_mut(&mut self) -> Option<&mut Pane> {
+        self.panes.get_mut(self.active_pane)
+    }
+
     pub fn next_pane(&mut self) {
         if !self.panes.is_empty() {
             self.active_pane = (self.active_pane + 1) % self.panes.len();

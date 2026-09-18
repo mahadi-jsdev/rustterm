@@ -92,6 +92,14 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let text = match app.mode {
         crate::app::InputMode::Normal => "Ctrl+A for commands".to_string(),
         crate::app::InputMode::Leader => "n new  x close  h/l switch  [ ] project  +/- split  q quit".to_string(),
+        // Palette and LineInput rendering is owned by a later task; these are
+        // placeholders so the status bar still draws something sensible.
+        crate::app::InputMode::Palette => "command palette".to_string(),
+        crate::app::InputMode::LineInput(_) => app
+            .line_input
+            .as_ref()
+            .map(|edit| edit.as_str().to_string())
+            .unwrap_or_default(),
     };
     frame.render_widget(Paragraph::new(text), area);
 }

@@ -87,6 +87,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             }
         }
+        // Palette and LineInput key handling is owned by the input task that
+        // introduces them; nothing enters these modes yet, so keys are
+        // swallowed rather than forwarded to the focused pane.
+        InputMode::Palette | InputMode::LineInput(_) => {}
     }
 }
 

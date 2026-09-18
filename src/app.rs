@@ -1,10 +1,23 @@
-use crate::pane::PaneEvent;
+use crate::pane::{Pane, PaneEvent, PaneId};
 use crate::project::Project;
+use crate::text_input::LineEdit;
+use ratatui::style::Color;
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::Instant;
 
 pub enum InputMode {
     Normal,
     Leader,
+    Palette,
+    LineInput(LinePurpose),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LinePurpose {
+    AddProject,
+    RenamePane,
 }
 
 pub struct App {
@@ -14,6 +27,18 @@ pub struct App {
     pub next_pane_id: u32,
     pub should_quit: bool,
     pub events_tx: mpsc::Sender<PaneEvent>,
+    pub closed_panes: VecDeque<ClosedPane>,
+    pub status_msg: Option<(String, Instant)>,
+    pub line_input: Option<LineEdit>,
+    pub last_watch_poll: Instant,
+}
+
+pub struct ClosedPane {
+    pub title: String,
+    pub cwd: PathBuf,
+    pub startup_command: Option<String>,
+    pub color: Option<Color>,
+    pub project: usize,
 }
 
 impl App {
@@ -25,6 +50,10 @@ impl App {
             next_pane_id: 0,
             should_quit: false,
             events_tx,
+            closed_panes: VecDeque::new(),
+            status_msg: None,
+            line_input: None,
+            last_watch_poll: Instant::now(),
         }
     }
 
@@ -56,6 +85,153 @@ impl App {
         let id = self.next_pane_id;
         self.next_pane_id += 1;
         id
+    }
+
+    pub fn flash(&mut self, msg: impl Into<String>) {
+        self.status_msg = Some((msg.into(), Instant::now()));
+    }
+
+    pub fn focused_pane_id(&self) -> Option<PaneId> {
+        self.active_project()?.active_pane().map(|p| p.id)
+    }
+
+    pub fn add_project(&mut self, root: PathBuf) {
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        if let Some(idx) = self.projects.iter().position(|p| p.root == root) {
+            self.set_active_project(idx);
+            return;
+        }
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "project".to_string());
+        self.projects.push(Project::new(name, root));
+        self.active_project = self.projects.len() - 1;
+        self.ensure_active_pane();
+    }
+
+    pub fn set_active_project(&mut self, idx: usize) {
+        if idx < self.projects.len() {
+            self.active_project = idx;
+            self.ensure_active_pane();
+        }
+    }
+
+    pub fn ensure_active_pane(&mut self) {
+        let needs = self
+            .active_project()
+            .map(|p| p.panes.is_empty())
+            .unwrap_or(false);
+        if needs {
+            self.spawn_pane(None);
+        }
+    }
+
+    /// The shared spawn path — leader `n`, palette New pane, agent runs,
+    /// and ensure-on-switch all come through here. Spawn size is 24x80;
+    /// the first rendered frame's sync-resize corrects it.
+    pub fn spawn_pane(&mut self, startup_command: Option<&str>) {
+        let id = self.alloc_pane_id();
+        let events_tx = self.events_tx.clone();
+        if let Some(project) = self.active_project_mut() {
+            let cwd = project.root.clone();
+            match Pane::spawn(id, format!("pane-{id}"), 24, 80, Some(&cwd), events_tx, startup_command)
+            {
+                Ok(pane) => {
+                    project.panes.push(pane);
+                    project.active_pane = project.panes.len() - 1;
+                }
+                Err(e) => self.flash(format!("spawn failed: {e}")),
+            }
+        }
+    }
+
+    pub fn close_active_pane(&mut self) {
+        let mut pane = None;
+        if let Some(project) = self.active_project_mut() {
+            if project.panes.is_empty() {
+                return;
+            }
+            let idx = project.active_pane;
+            let mut removed = project.panes.remove(idx);
+            let _ = removed.kill();
+            if project.active_pane >= project.panes.len() && project.active_pane > 0 {
+                project.active_pane -= 1;
+            }
+            pane = Some(removed);
+        }
+        // The `project` borrow ends above so the closed-pane history (a
+        // separate field on self) can be updated here.
+        if let Some(pane) = pane {
+            self.closed_panes.push_front(ClosedPane {
+                title: pane.title,
+                cwd: pane.cwd,
+                startup_command: pane.startup_command,
+                color: pane.color,
+                project: self.active_project,
+            });
+            self.closed_panes.truncate(5);
+        }
+    }
+
+    pub fn reopen_last_pane(&mut self) {
+        let Some(closed) = self.closed_panes.pop_front() else {
+            return;
+        };
+        let target = if closed.project < self.projects.len() {
+            closed.project
+        } else {
+            self.active_project
+        };
+        self.active_project = target;
+        let id = self.alloc_pane_id();
+        let events_tx = self.events_tx.clone();
+        if let Some(project) = self.active_project_mut() {
+            match Pane::spawn(
+                id,
+                closed.title,
+                24,
+                80,
+                Some(&closed.cwd),
+                events_tx,
+                closed.startup_command.as_deref(),
+            ) {
+                Ok(mut pane) => {
+                    pane.color = closed.color;
+                    project.panes.push(pane);
+                    project.active_pane = project.panes.len() - 1;
+                }
+                Err(e) => self.flash(format!("spawn failed: {e}")),
+            }
+        }
+    }
+
+    pub fn close_active_project(&mut self) {
+        if self.projects.len() <= 1 {
+            self.flash("can't close the last project");
+            return;
+        }
+        let idx = self.active_project;
+        let mut project = self.projects.remove(idx);
+        for pane in project.panes.iter_mut() {
+            let _ = pane.kill();
+        }
+        self.active_project = idx.min(self.projects.len() - 1);
+        self.ensure_active_pane();
+    }
+
+    pub fn adjust_split(&mut self, delta: f32) {
+        if let Some(project) = self.active_project_mut() {
+            project.col_split = (project.col_split + delta).clamp(0.15, 0.85);
+        }
+    }
+
+    pub fn clear_focused_badges(&mut self) {
+        if let Some(project) = self.active_project_mut() {
+            if let Some(pane) = project.active_pane_mut() {
+                pane.attention = false;
+            }
+        }
     }
 }
 
@@ -113,4 +289,99 @@ mod tests {
         assert_eq!(app.alloc_pane_id(), 1);
         assert_eq!(app.alloc_pane_id(), 2);
     }
+
+    #[test]
+    fn add_project_pushes_activates_and_spawns() {
+        let mut app = app_with_projects(&["one"]);
+        // Note: app_with_projects already roots its projects at /tmp — use a
+        // different existing dir or dedupe will switch instead of adding.
+        app.add_project(PathBuf::from("/etc"));
+        assert_eq!(app.projects.len(), 2);
+        assert_eq!(app.active_project, 1);
+        assert_eq!(app.projects[1].name, "etc");
+        assert_eq!(app.projects[1].panes.len(), 1, "new project spawns a pane");
+    }
+
+    #[test]
+    fn add_project_with_duplicate_root_switches_instead() {
+        let mut app = app_with_projects(&["one"]);
+        app.projects[0].root = std::fs::canonicalize("/tmp").unwrap();
+        app.add_project(PathBuf::from("/tmp"));
+        assert_eq!(app.projects.len(), 1);
+        assert_eq!(app.active_project, 0);
+    }
+
+    #[test]
+    fn switching_to_empty_project_spawns_a_pane() {
+        let mut app = app_with_projects(&["a", "b"]);
+        assert!(app.projects[1].panes.is_empty());
+        app.set_active_project(1);
+        assert_eq!(app.projects[1].panes.len(), 1);
+    }
+
+    #[test]
+    fn close_last_project_is_refused() {
+        let mut app = app_with_projects(&["only"]);
+        app.close_active_project();
+        assert_eq!(app.projects.len(), 1);
+        assert!(app.status_msg.is_some());
+    }
+
+    #[test]
+    fn close_project_kills_panes_and_activates_neighbor() {
+        let mut app = app_with_projects(&["a", "b"]);
+        app.set_active_project(1); // spawns a pane in b
+        app.close_active_project();
+        assert_eq!(app.projects.len(), 1);
+        assert_eq!(app.projects[0].name, "a");
+        assert_eq!(app.active_project, 0);
+    }
+
+    #[test]
+    fn closed_panes_history_caps_at_five_and_reopen_respawns() {
+        let mut app = app_with_projects(&["demo"]);
+        app.spawn_pane(None);
+        for i in 0..6 {
+            app.spawn_pane(None);
+            app.active_project_mut().unwrap().panes.last_mut().unwrap().title = format!("t{i}");
+            app.close_active_pane();
+        }
+        assert_eq!(app.closed_panes.len(), 5);
+        assert_eq!(app.closed_panes[0].title, "t5", "most recent first");
+        app.reopen_last_pane();
+        assert_eq!(app.closed_panes.len(), 4);
+        let panes = &app.active_project().unwrap().panes;
+        assert!(panes.iter().any(|p| p.title == "t5"));
+    }
+
+    #[test]
+    fn adjust_split_clamps() {
+        let mut app = app_with_projects(&["demo"]);
+        app.adjust_split(1.0);
+        assert_eq!(app.projects[0].col_split, 0.85);
+        app.adjust_split(-2.0);
+        assert_eq!(app.projects[0].col_split, 0.15);
+    }
+
+    #[test]
+    fn expand_tilde_replaces_leading_tilde() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_tilde("~/x"), PathBuf::from(format!("{home}/x")));
+        assert_eq!(expand_tilde("/abs"), PathBuf::from("/abs"));
+    }
+}
+
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let mut p = PathBuf::from(home);
+            p.push(rest);
+            return p;
+        }
+    } else if path == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    PathBuf::from(path)
 }
