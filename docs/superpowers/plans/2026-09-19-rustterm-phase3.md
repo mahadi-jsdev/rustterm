@@ -1148,7 +1148,7 @@ Methods:
         let matches = pane
             .parser
             .lock()
-            .map(|p| crate::search::find_matches(p.screen(), query))
+            .map(|mut p| crate::search::find_matches(p.screen_mut(), query))
             .unwrap_or_default();
         if matches.is_empty() {
             self.flash(format!("no matches: {query}"));
@@ -1204,7 +1204,7 @@ Methods:
                         let total = pane
                             .parser
                             .lock()
-                            .map(|p| crate::search::scrollback_len(p.screen()))
+                            .map(|mut p| crate::search::scrollback_len(p.screen_mut()))
                             .unwrap_or(0);
                         let off = crate::search::offset_for_row(total, m.row);
                         pane.set_scroll(off);
@@ -1677,8 +1677,8 @@ highlight_matches(frame, pane, *rect);
 fn highlight_matches(frame: &mut Frame, pane: &Pane, rect: Rect) {
     let Some(s) = &pane.search else { return };
     let (total, offset, height) = match pane.parser.lock() {
-        Ok(p) => {
-            let sc = p.screen();
+        Ok(mut p) => {
+            let sc = p.screen_mut();
             (
                 crate::search::scrollback_len(sc),
                 sc.scrollback(),
