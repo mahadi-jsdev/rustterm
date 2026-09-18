@@ -6,5 +6,6 @@ pub mod project;
 pub mod app;
 pub mod keys;
 pub mod input;
+pub mod text_input;
 pub mod ui;
 pub mod watcher;
