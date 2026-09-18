@@ -8,9 +8,9 @@ use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::channel::<PaneEvent>();
-    // AppEvent channel — the receiver is drained in the run loop once the
-    // git-poll / AI-message dispatch lands (Task 9).
-    let (app_tx, _app_rx) = mpsc::channel::<rustterm::app::AppEvent>();
+    // AppEvent channel — drained in the run loop: git-status polls and
+    // AI-commit worker results arrive here.
+    let (app_tx, app_rx) = mpsc::channel::<rustterm::app::AppEvent>();
 
     let roots = project_roots_from_args();
     let mut app = App::new(events_tx.clone(), app_tx.clone());
@@ -39,7 +39,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut terminal = ratatui::init();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
-    let result = run(&mut terminal, &mut app, &events_rx);
+    let result = run(&mut terminal, &mut app, &events_rx, &app_rx);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
@@ -63,6 +63,7 @@ fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     events_rx: &mpsc::Receiver<PaneEvent>,
+    app_rx: &mpsc::Receiver<rustterm::app::AppEvent>,
 ) -> anyhow::Result<()> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -98,6 +99,27 @@ fn run(
             }
         }
 
+        while let Ok(event) = app_rx.try_recv() {
+            match event {
+                rustterm::app::AppEvent::GitStatus { root, status } => {
+                    app.git_poll_in_flight = false;
+                    if app.active_root().as_ref() == Some(&root) {
+                        app.git_status = status;
+                    }
+                }
+                rustterm::app::AppEvent::AiMessage(result) => match result {
+                    Ok(msg) => {
+                        app.line_input =
+                            Some(rustterm::text_input::LineEdit::from_str(&msg));
+                        app.mode = rustterm::app::InputMode::LineInput(
+                            rustterm::app::LinePurpose::CommitMsg,
+                        );
+                    }
+                    Err(e) => app.flash(format!("ai commit: {e}")),
+                },
+            }
+        }
+
         if app.last_watch_poll.elapsed() >= rustterm::watcher::POLL {
             app.last_watch_poll = Instant::now();
             let now = Instant::now();
@@ -119,6 +141,20 @@ fn run(
             }
             for (id, e) in pending {
                 rustterm::notify::dispatch(app, id, e);
+            }
+        }
+
+        // 1s git-status poll — one worker in flight at a time; the result
+        // arrives on app_rx and is applied only if the root still matches.
+        if app.last_git_poll.elapsed() >= Duration::from_secs(1) && !app.git_poll_in_flight {
+            app.last_git_poll = Instant::now();
+            if let Some(root) = app.active_root() {
+                app.git_poll_in_flight = true;
+                let tx = app.app_tx.clone();
+                std::thread::spawn(move || {
+                    let status = rustterm::git::status(&root);
+                    let _ = tx.send(rustterm::app::AppEvent::GitStatus { root, status });
+                });
             }
         }
 
