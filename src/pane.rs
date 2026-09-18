@@ -74,6 +74,9 @@ impl Pane {
     }
 
     pub fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
+        if self.parser.lock().unwrap().screen().size() == (rows, cols) {
+            return Ok(());
+        }
         self.parser.lock().unwrap().screen_mut().set_size(rows, cols);
         self.master.resize(portable_pty::PtySize {
             rows,

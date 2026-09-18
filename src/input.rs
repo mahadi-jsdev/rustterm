@@ -1,7 +1,6 @@
 use crate::app::{App, InputMode};
 use crate::keys::key_event_to_bytes;
 use crate::pane::Pane;
-use crate::project::Project;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
@@ -88,6 +87,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::Project;
     use std::path::PathBuf;
     use std::sync::mpsc;
 

@@ -2,10 +2,10 @@ use crate::app::App;
 use crate::layout::pane_rects;
 use crate::pane::Pane;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
-use tui_term::widget::PseudoTerminal;
+use tui_term::widget::{Cursor, PseudoTerminal};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -52,17 +52,27 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let rects = pane_rects(area, project.panes.len(), project.col_split, project.row_split);
-    for (pane, rect) in project.panes.iter().zip(rects.iter()) {
+    for (index, (pane, rect)) in project.panes.iter().zip(rects.iter()).enumerate() {
         sync_pane_size(pane, *rect);
         let title = if pane.exited.is_some() {
             format!("{} [exited]", pane.title)
         } else {
             pane.title.clone()
         };
+        let is_active = index == project.active_pane;
+        let border_style = if is_active {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(title);
+        let cursor = Cursor::default().visibility(is_active);
         let parser = pane.parser.lock().unwrap();
         let screen = parser.screen();
-        let widget =
-            PseudoTerminal::new(screen).block(Block::default().borders(Borders::ALL).title(title));
+        let widget = PseudoTerminal::new(screen).block(block).cursor(cursor);
         frame.render_widget(widget, *rect);
     }
 }
@@ -70,6 +80,11 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
 fn sync_pane_size(pane: &Pane, rect: Rect) {
     let rows = rect.height.saturating_sub(2).max(1);
     let cols = rect.width.saturating_sub(2).max(1);
+    // Discarding the error is intentional: a resize failure here just means
+    // the pane keeps its previous size for this one frame. It isn't a
+    // permanent loss — the next frame calls resize() again with the current
+    // rect and will succeed once whatever transient condition caused this
+    // failure clears.
     let _ = pane.resize(rows, cols);
 }
 

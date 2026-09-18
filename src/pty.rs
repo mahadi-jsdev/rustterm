@@ -45,7 +45,6 @@ pub fn spawn(rows: u16, cols: u16, cwd: Option<&Path>) -> anyhow::Result<PtySpaw
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read as _;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 

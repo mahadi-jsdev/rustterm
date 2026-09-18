@@ -1,4 +1,3 @@
-// src/main.rs — full replacement
 use rustterm::app::App;
 use rustterm::pane::{Pane, PaneEvent};
 use rustterm::project::Project;
