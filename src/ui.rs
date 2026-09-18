@@ -118,7 +118,15 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
             title.push_str(" !");
         }
         match &pane.status {
-            crate::pane::PaneStatus::Exited(code) => title.push_str(&format!(" [exited {code}]")),
+            crate::pane::PaneStatus::Exited(code) => {
+                // -1 means "exit code unavailable" (wait failed) — showing a
+                // bare [exited] is less confusing than a bogus code.
+                if *code < 0 {
+                    title.push_str(" [exited]")
+                } else {
+                    title.push_str(&format!(" [exited {code}]"))
+                }
+            }
             crate::pane::PaneStatus::Failed(_) => title.push_str(" [failed]"),
             crate::pane::PaneStatus::Running => {}
         }
@@ -216,7 +224,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 format!("Ctrl+A for commands{state}")
             }
             InputMode::Leader => {
-                "n new  x close  h/l switch  [ ] project  +/- split  : palette  c add-project  q quit"
+                "n new  x close  h/l switch  [ ] project  +/- split  : palette  c add-project  g git  G lazygit  f find  / search  q quit"
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),

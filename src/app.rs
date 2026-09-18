@@ -27,7 +27,10 @@ pub enum LinePurpose {
 
 pub enum AppEvent {
     GitStatus { root: PathBuf, status: Option<crate::git::GitStatus> },
-    AiMessage(Result<String, String>),
+    /// `root` is the project root polled when the worker started — the
+    /// commit must target THAT repo even if the user switched projects
+    /// while the request was in flight.
+    AiMessage { root: PathBuf, result: Result<String, String> },
 }
 
 pub struct App {
@@ -52,6 +55,12 @@ pub struct App {
     pub git_poll_in_flight: bool,
     pub last_git_poll: Instant,
     pub finder: Option<crate::finder::FinderState>,
+    /// Root captured when the AI-commit worker started — the CommitMsg
+    /// prompt commits HERE, not the currently-active project.
+    pub commit_root: Option<PathBuf>,
+    /// One AI-commit worker at a time — set before spawn, cleared when
+    /// the AppEvent::AiMessage result is drained.
+    pub ai_in_flight: bool,
 }
 
 pub struct ClosedPane {
@@ -86,6 +95,8 @@ impl App {
             git_poll_in_flight: false,
             last_git_poll: Instant::now(),
             finder: None,
+            commit_root: None,
+            ai_in_flight: false,
         }
     }
 
@@ -100,6 +111,7 @@ impl App {
     pub fn next_project(&mut self) {
         if !self.projects.is_empty() {
             self.active_project = (self.active_project + 1) % self.projects.len();
+            self.clear_git_cache();
         }
     }
 
@@ -110,7 +122,15 @@ impl App {
             } else {
                 self.active_project - 1
             };
+            self.clear_git_cache();
         }
+    }
+
+    /// Drop the cached git view on project switch — it belongs to the
+    /// previously-active root. The next 1s poll repopulates it.
+    fn clear_git_cache(&mut self) {
+        self.git_status = None;
+        self.sidebar_branch_list.clear();
     }
 
     pub fn alloc_pane_id(&mut self) -> u32 {
@@ -140,12 +160,14 @@ impl App {
         self.projects.push(Project::new(name, root));
         self.active_project = self.projects.len() - 1;
         self.ensure_active_pane();
+        self.clear_git_cache();
     }
 
     pub fn set_active_project(&mut self, idx: usize) {
         if idx < self.projects.len() {
             self.active_project = idx;
             self.ensure_active_pane();
+            self.clear_git_cache();
         }
     }
 
@@ -337,8 +359,13 @@ impl App {
 
     /// Stage everything, snapshot the diff, and kick off the worker that
     /// posts AppEvent::AiMessage. Fast-fails inline (flash) when there's
-    /// nothing to send or no API key.
+    /// nothing to send or no API key. Only one worker at a time —
+    /// `ai_in_flight` is cleared when the result event is drained.
     pub fn start_ai_commit(&mut self) {
+        if self.ai_in_flight {
+            self.flash("ai commit already running");
+            return;
+        }
         let Some(root) = self.active_root() else { return };
         if let Err(e) = crate::git::add_all(&root) {
             self.flash(format!("git add: {e}"));
@@ -363,9 +390,10 @@ impl App {
             }
         };
         let tx = self.app_tx.clone();
+        self.ai_in_flight = true;
         std::thread::spawn(move || {
             let r = crate::ai_commit::generate_message(&diff, &key);
-            let _ = tx.send(AppEvent::AiMessage(r));
+            let _ = tx.send(AppEvent::AiMessage { root, result: r });
         });
         self.flash("generating commit message…");
     }
@@ -705,6 +733,49 @@ mod tests {
         app.exit_search();
         assert!(matches!(app.mode, InputMode::Normal));
         assert!(app.active_project().unwrap().panes[0].search.is_none());
+    }
+
+    #[test]
+    fn commit_root_survives_project_switch() {
+        // The AI worker carries the root it polled; the CommitMsg submit path
+        // must use THAT root even when the user switched projects mid-request.
+        let mut app = app_with_projects(&["a", "b"]);
+        app.projects[0].root = PathBuf::from("/tmp");
+        app.projects[1].root = PathBuf::from("/etc");
+
+        // AiMessage drain stores the polled root, then the user switches.
+        app.commit_root = Some(PathBuf::from("/tmp"));
+        app.set_active_project(1);
+        assert_eq!(app.active_root(), Some(PathBuf::from("/etc")));
+
+        // The submit path reads commit_root FIRST — same expression as
+        // input.rs's CommitMsg arm — so the polled root wins.
+        let root = app
+            .commit_root
+            .take()
+            .unwrap_or_else(|| app.active_root().unwrap_or_default());
+        assert_eq!(root, PathBuf::from("/tmp"));
+        assert!(app.commit_root.is_none(), "take() consumes the stored root");
+
+        // With no stored root the fallback is the active project.
+        let root = app
+            .commit_root
+            .take()
+            .unwrap_or_else(|| app.active_root().unwrap_or_default());
+        assert_eq!(root, PathBuf::from("/etc"));
+    }
+
+    #[test]
+    fn project_switch_clears_cached_git_view() {
+        let mut app = app_with_projects(&["a", "b"]);
+        app.git_status = Some(crate::git::GitStatus {
+            branch: "main".into(),
+            files: vec![crate::git::ChangedFile { status: 'M', path: "x".into() }],
+        });
+        app.sidebar_branch_list = vec!["main".into()];
+        app.set_active_project(1);
+        assert!(app.git_status.is_none());
+        assert!(app.sidebar_branch_list.is_empty());
     }
 }
 

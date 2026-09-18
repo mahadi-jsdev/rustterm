@@ -175,8 +175,10 @@ impl Pane {
         Ok(())
     }
 
+    /// Best-effort: a failed kill() must NOT skip wait() — the early `?`
+    /// used to leave the child unreaped (zombie) on error.
     pub fn kill(&mut self) -> anyhow::Result<()> {
-        self.child.kill()?;
+        let _ = self.child.kill();
         let _ = self.child.wait();
         Ok(())
     }

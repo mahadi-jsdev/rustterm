@@ -107,16 +107,43 @@ fn run(
                         app.git_status = status;
                     }
                 }
-                rustterm::app::AppEvent::AiMessage(result) => match result {
-                    Ok(msg) => {
-                        app.line_input =
-                            Some(rustterm::text_input::LineEdit::from_str(&msg));
-                        app.mode = rustterm::app::InputMode::LineInput(
-                            rustterm::app::LinePurpose::CommitMsg,
-                        );
+                rustterm::app::AppEvent::AiMessage { root, result } => {
+                    app.ai_in_flight = false;
+                    match result {
+                        Ok(msg) => {
+                            // A prompt is already open (AddProject / RenamePane /
+                            // Search) — don't clobber its buffer. The user can
+                            // re-run ai-commit once it's closed.
+                            if app.line_input.is_some() {
+                                app.flash("ai commit ready — re-run after current prompt");
+                            } else {
+                                if let Some(project) = app.active_project_mut() {
+                                    if let Some(pane) = project.active_pane_mut() {
+                                        pane.search = None; // clear orphaned search state
+                                    }
+                                }
+                                if matches!(
+                                    app.mode,
+                                    rustterm::app::InputMode::Search
+                                        | rustterm::app::InputMode::Finder
+                                        | rustterm::app::InputMode::Sidebar
+                                ) {
+                                    app.finder = None;
+                                    app.mode = rustterm::app::InputMode::Normal;
+                                }
+                                // The commit targets the polled root — the user
+                                // may have switched projects mid-request.
+                                app.commit_root = Some(root);
+                                app.line_input =
+                                    Some(rustterm::text_input::LineEdit::from_str(&msg));
+                                app.mode = rustterm::app::InputMode::LineInput(
+                                    rustterm::app::LinePurpose::CommitMsg,
+                                );
+                            }
+                        }
+                        Err(e) => app.flash(format!("ai commit: {e}")),
                     }
-                    Err(e) => app.flash(format!("ai commit: {e}")),
-                },
+                }
             }
         }
 

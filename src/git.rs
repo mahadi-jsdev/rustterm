@@ -94,7 +94,9 @@ pub fn branches(root: &Path) -> Vec<String> {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
                 .map(|l| l.trim().to_string())
-                .filter(|s| !s.is_empty() && s != &current)
+                // "(HEAD detached at <hash>)" is a pseudo-branch git emits
+                // in detached state — it's not switchable; drop it.
+                .filter(|s| !s.is_empty() && s != &current && !s.starts_with('('))
                 .collect()
         })
         .unwrap_or_default();
@@ -192,6 +194,34 @@ mod tests {
         let bs = branches(&root);
         assert_eq!(bs[0], "main");
         assert!(bs.contains(&"feature".to_string()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn branches_excludes_detached_head_pseudo_branch() {
+        let root = repo("detached");
+        // Detach HEAD — `git branch --format` then emits a
+        // "(HEAD detached at <hash>)" pseudo-branch that isn't switchable.
+        let head = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["checkout", &hash])
+            .output()
+            .unwrap();
+
+        let bs = branches(&root);
+        assert!(
+            bs.iter().all(|b| !b.starts_with('(')),
+            "detached-HEAD pseudo-branch must not appear: {bs:?}"
+        );
+        assert!(bs.contains(&"main".to_string()));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

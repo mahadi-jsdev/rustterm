@@ -11,6 +11,7 @@ pub fn generate_message(diff: &str, api_key: &str) -> Result<String, String> {
         "temperature": 0.2,
     });
     let resp = ureq::post("https://api.openai.com/v1/chat/completions")
+        .timeout(std::time::Duration::from_secs(30))
         .set("Authorization", &format!("Bearer {api_key}"))
         .send_json(body)
         .map_err(|e| format!("openai: {e}"))?;

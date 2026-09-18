@@ -174,13 +174,21 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 return;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('g') => {
+                KeyCode::Esc => {
                     app.mode = InputMode::Normal;
                 }
-                KeyCode::Char('j') | KeyCode::Down => app.sidebar_move(1),
-                KeyCode::Char('k') | KeyCode::Up => app.sidebar_move(-1),
-                KeyCode::Char('b') => app.sidebar_toggle_branches(),
-                KeyCode::Char('c') => app.start_ai_commit(),
+                // Plain-char bindings require NO modifiers — otherwise e.g.
+                // Ctrl+C would run `git add -A` via the 'c' binding. (Ctrl+A
+                // is intercepted above and can't reach this match.)
+                KeyCode::Char('h') | KeyCode::Char('g') if key.modifiers.is_empty() => {
+                    app.mode = InputMode::Normal;
+                }
+                KeyCode::Char('j') if key.modifiers.is_empty() => app.sidebar_move(1),
+                KeyCode::Down => app.sidebar_move(1),
+                KeyCode::Char('k') if key.modifiers.is_empty() => app.sidebar_move(-1),
+                KeyCode::Up => app.sidebar_move(-1),
+                KeyCode::Char('b') if key.modifiers.is_empty() => app.sidebar_toggle_branches(),
+                KeyCode::Char('c') if key.modifiers.is_empty() => app.start_ai_commit(),
                 KeyCode::Enter => {
                     if app.sidebar_branches {
                         if let (Some(root), Some(branch)) =
@@ -195,8 +203,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                             }
                         }
                     } else if let Some(file) = app.sidebar_selected_file() {
+                        // `diff HEAD` covers staged AND unstaged changes —
+                        // plain `diff` leaves staged edits invisible.
                         let cmd = format!(
-                            "git --no-pager diff --color=always -- {}",
+                            "git --no-pager diff HEAD --color=always -- {}",
                             crate::app::shell_quote(&file)
                         );
                         app.spawn_pane(Some(&cmd));
@@ -247,11 +257,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             }
         }
-        InputMode::Search => match key.code {
-            KeyCode::Char('n') => app.search_next(),
-            KeyCode::Char('N') => app.search_prev(),
-            _ => app.exit_search(), // Esc, Enter, and ANY other key exits
-        },
+        InputMode::Search => {
+            // Ctrl+A exits search AND re-enters Leader — consistent with
+            // every other non-text-entry mode.
+            if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.exit_search();
+                app.mode = InputMode::Leader;
+                return;
+            }
+            match key.code {
+                KeyCode::Char('n') => app.search_next(),
+                KeyCode::Char('N') => app.search_prev(),
+                _ => app.exit_search(), // Esc, Enter, and ANY other key exits
+            }
+        }
         InputMode::LineInput(purpose) => {
             let Some(edit) = app.line_input.as_mut() else {
                 app.mode = InputMode::Normal;
@@ -272,6 +291,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 EditResult::Editing => {}
                 EditResult::Cancel => {
                     app.line_input = None;
+                    app.commit_root = None;
                     app.mode = InputMode::Normal;
                 }
                 EditResult::Submit(text) => match purpose {
@@ -303,14 +323,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     }
                     LinePurpose::CommitMsg => {
                         let msg = text.trim().to_string();
-                        if let Some(root) = app.active_root() {
-                            if msg.is_empty() {
-                                app.flash("commit aborted: empty message");
-                            } else {
-                                match crate::git::commit(&root, &msg) {
-                                    Ok(hash) => app.flash(format!("committed {hash}")),
-                                    Err(e) => app.flash(format!("git commit: {e}")),
-                                }
+                        // Commit to the root the AI worker polled — the user
+                        // may have switched projects while it generated the
+                        // message. Fall back to the active root for manually
+                        // opened prompts.
+                        let root = app
+                            .commit_root
+                            .take()
+                            .unwrap_or_else(|| app.active_root().unwrap_or_default());
+                        if msg.is_empty() {
+                            app.flash("commit aborted: empty message");
+                        } else {
+                            match crate::git::commit(&root, &msg) {
+                                Ok(hash) => app.flash(format!("committed {hash}")),
+                                Err(e) => app.flash(format!("git commit: {e}")),
                             }
                         }
                         app.line_input = None;
@@ -686,5 +712,37 @@ mod tests {
         assert!(matches!(app.mode, InputMode::Search));
         handle_key(&mut app, key(KeyCode::Char('z'), KeyModifiers::NONE));
         assert!(matches!(app.mode, InputMode::Normal));
+    }
+
+    #[test]
+    fn search_mode_ctrl_a_goes_to_leader() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            pane.parser.lock().unwrap().process(b"needle\r\n");
+        }
+        app.start_search("needle");
+        assert!(matches!(app.mode, InputMode::Search));
+        assert!(app.active_project().unwrap().panes[0].search.is_some());
+
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(matches!(app.mode, InputMode::Leader));
+        assert!(
+            app.active_project().unwrap().panes[0].search.is_none(),
+            "Ctrl+A must clear the pane's search state, not orphan it"
+        );
+    }
+
+    #[test]
+    fn sidebar_ctrl_c_does_not_trigger_ai_commit() {
+        let mut app = app_with_one_project();
+        app.enter_sidebar();
+        // Ctrl+C must not hit the plain 'c' binding — git add -A is a
+        // destructive side effect for a key users hit reflexively.
+        handle_key(&mut app, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.ai_in_flight);
+        assert!(app.status_msg.is_none(), "no ai-commit path should have run");
+        assert!(matches!(app.mode, InputMode::Sidebar), "mode unchanged");
     }
 }
