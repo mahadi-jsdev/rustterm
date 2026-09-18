@@ -39,7 +39,9 @@ pub struct ClosedPane {
     pub cwd: PathBuf,
     pub startup_command: Option<String>,
     pub color: Option<Color>,
-    pub project: usize,
+    /// Root of the project the pane was closed from — NOT an index into
+    /// `projects` (indices go stale when a lower-indexed project closes).
+    pub project: PathBuf,
 }
 
 impl App {
@@ -150,6 +152,7 @@ impl App {
 
     pub fn close_active_pane(&mut self) {
         let mut pane = None;
+        let mut project_root = None;
         if let Some(project) = self.active_project_mut() {
             if project.panes.is_empty() {
                 return;
@@ -160,6 +163,7 @@ impl App {
             if project.active_pane >= project.panes.len() && project.active_pane > 0 {
                 project.active_pane -= 1;
             }
+            project_root = Some(project.root.clone());
             pane = Some(removed);
         }
         // The `project` borrow ends above so the closed-pane history (a
@@ -170,7 +174,7 @@ impl App {
                 cwd: pane.cwd,
                 startup_command: pane.startup_command,
                 color: pane.color,
-                project: self.active_project,
+                project: project_root.unwrap_or_default(),
             });
             self.closed_panes.truncate(5);
         }
@@ -180,11 +184,14 @@ impl App {
         let Some(closed) = self.closed_panes.pop_front() else {
             return;
         };
-        let target = if closed.project < self.projects.len() {
-            closed.project
-        } else {
-            self.active_project
-        };
+        // Target the ORIGINATING project, matched by root — fall back to the
+        // active project if it's gone (closed since). An index would go stale
+        // whenever a lower-indexed project closed after the pane was recorded.
+        let target = self
+            .projects
+            .iter()
+            .position(|p| p.root == closed.project)
+            .unwrap_or(self.active_project);
         self.active_project = target;
         let id = self.alloc_pane_id();
         let events_tx = self.events_tx.clone();
@@ -354,6 +361,60 @@ mod tests {
         assert_eq!(app.closed_panes.len(), 4);
         let panes = &app.active_project().unwrap().panes;
         assert!(panes.iter().any(|p| p.title == "t5"));
+    }
+
+    #[test]
+    fn reopen_targets_originating_project_after_lower_index_close() {
+        // Regression: ClosedPane.project used to store a Vec index, which went
+        // stale when a lower-indexed project closed afterward — the pane then
+        // respawned under the WRONG project. Now it's matched by root.
+        let mut app = app_with_projects(&["a", "b", "c"]);
+        app.projects[0].root = PathBuf::from("/tmp");
+        app.projects[1].root = PathBuf::from("/etc");
+        app.projects[2].root = PathBuf::from("/usr");
+
+        // close a pane in project b (root /etc, index 1)
+        app.set_active_project(1); // ensure-spawns a pane in b
+        app.close_active_pane();
+        assert_eq!(app.closed_panes[0].project, PathBuf::from("/etc"));
+
+        // close project a (index 0) → b and c shift to indices 0 and 1
+        app.set_active_project(0);
+        app.close_active_project();
+        assert_eq!(app.projects.len(), 2);
+        assert_eq!(app.projects[0].root, PathBuf::from("/etc"));
+
+        // reopen → lands in the ORIGINATING project (root /etc, now index 0),
+        // NOT the stale index 1 (old c).
+        app.reopen_last_pane();
+        assert_eq!(app.active_project, 0);
+        assert_eq!(app.projects[0].root, PathBuf::from("/etc"));
+        assert!(
+            !app.projects[0].panes.is_empty(),
+            "pane respawned under the originating project"
+        );
+    }
+
+    #[test]
+    fn reopen_falls_back_to_active_project_when_origin_gone() {
+        // Originating project closed entirely → respawn under the ACTIVE project.
+        let mut app = app_with_projects(&["a", "b"]);
+        app.projects[0].root = PathBuf::from("/tmp");
+        app.projects[1].root = PathBuf::from("/etc");
+
+        // close a pane in b (root /etc), then close project b itself
+        app.set_active_project(1);
+        app.close_active_pane();
+        app.close_active_project(); // removes b; a stays, active → 0
+        assert_eq!(app.projects.len(), 1);
+        assert_eq!(app.projects[0].root, PathBuf::from("/tmp"));
+
+        app.reopen_last_pane();
+        assert_eq!(app.active_project, 0);
+        assert!(
+            !app.projects[0].panes.is_empty(),
+            "pane respawned under the active (fallback) project"
+        );
     }
 
     #[test]
