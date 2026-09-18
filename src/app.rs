@@ -30,6 +30,7 @@ pub struct App {
     pub closed_panes: VecDeque<ClosedPane>,
     pub status_msg: Option<(String, Instant)>,
     pub line_input: Option<LineEdit>,
+    pub palette: Option<crate::palette::Palette>,
     pub last_watch_poll: Instant,
 }
 
@@ -53,6 +54,7 @@ impl App {
             closed_panes: VecDeque::new(),
             status_msg: None,
             line_input: None,
+            palette: None,
             last_watch_poll: Instant::now(),
         }
     }
