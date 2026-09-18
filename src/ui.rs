@@ -19,9 +19,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if matches!(app.mode, InputMode::Palette) {
         draw_palette(frame, app);
     }
+    if matches!(app.mode, InputMode::Finder) {
+        draw_finder(frame, app);
+    }
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
+    // Projects get their rows + border, capped at 10 so git always shows.
+    let project_h = (app.projects.len() as u16 + 2).min(10).min(area.height);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(project_h), Constraint::Min(5)])
+        .split(area);
     let items: Vec<ListItem> = app
         .projects
         .iter()
@@ -45,7 +54,51 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Projects"));
-    frame.render_widget(list, area);
+    frame.render_widget(list, chunks[0]);
+    draw_git_section(frame, app, chunks[1]);
+}
+
+fn draw_git_section(frame: &mut Frame, app: &App, area: Rect) {
+    let focused = matches!(app.mode, InputMode::Sidebar);
+    let border = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    };
+    let title = app
+        .git_status
+        .as_ref()
+        .map(|s| format!("⎇ {}", s.branch))
+        .unwrap_or_else(|| "git".to_string());
+    let block = Block::default().borders(Borders::ALL).border_style(border).title(title);
+
+    let items: Vec<ListItem> = if app.sidebar_branches {
+        app.sidebar_branch_list
+            .iter()
+            .enumerate()
+            .map(|(i, b)| sidebar_row(b.clone(), i, app.sidebar_sel, focused))
+            .collect()
+    } else {
+        match app.git_status.as_ref() {
+            Some(s) => s
+                .files
+                .iter()
+                .enumerate()
+                .map(|(i, f)| sidebar_row(format!("{} {}", f.status, f.path), i, app.sidebar_sel, focused))
+                .collect(),
+            None => vec![ListItem::new("  no repo")],
+        }
+    };
+    frame.render_widget(List::new(items).block(block), area);
+}
+
+fn sidebar_row(text: String, i: usize, sel: usize, focused: bool) -> ListItem<'static> {
+    let style = if focused && i == sel {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    ListItem::new(text).style(style)
 }
 
 fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
@@ -88,6 +141,41 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
         let screen = parser.screen();
         let widget = PseudoTerminal::new(screen).block(block).cursor(cursor);
         frame.render_widget(widget, *rect);
+        drop(parser); // highlight_matches re-locks for the scrollback math
+        highlight_matches(frame, pane, *rect);
+    }
+}
+
+/// Post-render pass: REVERSED on each visible search-match cell. Match rows
+/// index the full grid (scrollback + visible); visible view row r shows grid
+/// line (total - offset + r).
+fn highlight_matches(frame: &mut Frame, pane: &Pane, rect: Rect) {
+    let Some(s) = &pane.search else { return };
+    let (total, offset, height) = match pane.parser.lock() {
+        Ok(mut p) => {
+            let sc = p.screen_mut();
+            (
+                crate::search::scrollback_len(sc),
+                sc.scrollback(),
+                sc.size().0 as usize,
+            )
+        }
+        Err(_) => return,
+    };
+    for m in &s.matches {
+        let view_row = m.row as i64 - (total as i64 - offset as i64);
+        if view_row < 0 || view_row >= height as i64 {
+            continue;
+        }
+        let y = rect.y + 1 + view_row as u16; // +1 for the border
+        for dx in 0..m.len {
+            let x = rect.x + 1 + (m.col + dx) as u16;
+            // A match near a row's right edge can overshoot — clamp inside
+            // the block's borders.
+            if x < rect.x + rect.width - 1 && y < rect.y + rect.height - 1 {
+                frame.buffer_mut()[(x, y)].modifier |= Modifier::REVERSED;
+            }
+        }
     }
 }
 
@@ -132,10 +220,11 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),
-            // Placeholder hints — real per-mode status text lands with Task 8.
-            InputMode::Sidebar => "git sidebar".to_string(),
-            InputMode::Finder => "file finder".to_string(),
-            InputMode::Search => "search".to_string(),
+            InputMode::Sidebar => {
+                "j/k move  enter open  b branches  c ai-commit  esc back".to_string()
+            }
+            InputMode::Finder => "type to filter  ↑/↓ move  enter open  esc cancel".to_string(),
+            InputMode::Search => "n next  N prev  any key to exit".to_string(),
             InputMode::LineInput(purpose) => {
                 let label = match purpose {
                     crate::app::LinePurpose::AddProject => "Add project: ",
@@ -168,27 +257,28 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(text), area);
 }
 
-fn draw_palette(frame: &mut Frame, app: &App) {
-    let Some(pal) = app.palette.as_ref() else { return };
-    let area = frame.area();
-    // 3/5 of the screen but ≥30 cols; the clamp min is capped at area.width
-    // because clamp() panics when min > max (e.g. a 20-col terminal).
+/// Overlay rect shared by palette + finder: 3/5 of the screen but ≥30 cols
+/// (the clamp min is capped at area.width because clamp() panics when
+/// min > max, e.g. a 20-col terminal). Height fits `items` (border×2 + query
+/// row + items) rather than a fixed size: on machines with agent CLIs on
+/// PATH, "Run <agent>" entries push "Quit" past a 14-row overlay's visible
+/// rows. Capped at area.height - y (after the 6-row floor) so the rect's
+/// bottom edge stays on-screen given the y = h/6 top offset.
+fn centered_rect(area: Rect, items: usize) -> Rect {
     let width = (area.width * 3 / 5).clamp(30.min(area.width), area.width);
-    // Height fits the filtered command count (border×2 + query row + items)
-    // rather than the spec's fixed 14: on machines with agent CLIs on PATH,
-    // "Run <agent>" entries push "Quit" past a 14-row overlay's visible rows.
-    // Capped at area.height - y (after the 6-row floor) so the rect's bottom
-    // edge stays on-screen given the y = h/6 top offset.
     let y = area.height / 6;
-    let height = (pal.filtered().len() as u16 + 3)
-        .max(6)
-        .min(area.height.saturating_sub(y));
-    let rect = Rect {
+    let height = (items as u16 + 3).max(6).min(area.height.saturating_sub(y));
+    Rect {
         x: (area.width - width) / 2,
         y,
         width,
         height,
-    };
+    }
+}
+
+fn draw_palette(frame: &mut Frame, app: &App) {
+    let Some(pal) = app.palette.as_ref() else { return };
+    let rect = centered_rect(frame.area(), pal.filtered().len());
     frame.render_widget(Clear, rect);
     let block = Block::default().borders(Borders::ALL).title("Command");
     let inner = block.inner(rect);
@@ -213,6 +303,36 @@ fn draw_palette(frame: &mut Frame, app: &App) {
                 Style::default()
             };
             ListItem::new(c.label.clone()).style(style)
+        })
+        .collect();
+    frame.render_widget(List::new(items), rows[1]);
+}
+
+fn draw_finder(frame: &mut Frame, app: &App) {
+    let Some(f) = app.finder.as_ref() else { return };
+    let filtered = f.filtered();
+    let rect = centered_rect(frame.area(), filtered.len());
+    frame.render_widget(Clear, rect);
+    let block = Block::default().borders(Borders::ALL).title("Find file");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    frame.render_widget(Paragraph::new(format!("> {}", f.query)), rows[0]);
+    let visible = rows[1].height as usize;
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .enumerate()
+        .take(visible)
+        .map(|(i, p)| {
+            let style = if i == f.selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(p.to_string_lossy().to_string()).style(style)
         })
         .collect();
     frame.render_widget(List::new(items), rows[1]);
@@ -406,5 +526,54 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &app)).unwrap();
         assert!(buffer_contains(terminal.backend().buffer(), "/tmp/fo"));
+    }
+
+    #[test]
+    fn sidebar_shows_branch_and_changed_files() {
+        let (tx, _rx) = mpsc::channel();
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.git_status = Some(crate::git::GitStatus {
+            branch: "main".into(),
+            files: vec![crate::git::ChangedFile { status: 'M', path: "src/app.rs".into() }],
+        });
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        assert!(buffer_contains(buf, "main"));
+        assert!(buffer_contains(buf, "M src/app.rs"));
+    }
+
+    #[test]
+    fn finder_overlay_lists_files() {
+        let (tx, _rx) = mpsc::channel();
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.mode = InputMode::Finder;
+        app.finder = Some(crate::finder::FinderState::open(&PathBuf::from("/tmp")));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        assert!(buffer_contains(terminal.backend().buffer(), "Find file"));
+    }
+
+    #[test]
+    fn exited_pane_title_shows_the_code() {
+        let (tx, _rx) = mpsc::channel();
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
+        let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
+        let (ptx, _prx) = mpsc::channel();
+        let mut pane = Pane::spawn(1, "work".into(), 24, 80, None, ptx, None).unwrap();
+        pane.status = crate::pane::PaneStatus::Exited(3);
+        project.panes.push(pane);
+        app.projects.push(project);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        assert!(buffer_contains(terminal.backend().buffer(), "[exited 3]"));
     }
 }
