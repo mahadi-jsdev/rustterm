@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
         cols,
         Some(&cwd),
         events_tx,
+        None,
     )?;
     project.panes.push(first_pane);
     app.projects.push(project);

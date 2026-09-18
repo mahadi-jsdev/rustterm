@@ -51,7 +51,7 @@ mod tests {
 
     fn dummy_pane(id: u32) -> Pane {
         let (tx, _rx) = mpsc::channel::<PaneEvent>();
-        Pane::spawn(id, format!("pane-{id}"), 24, 80, None, tx).unwrap()
+        Pane::spawn(id, format!("pane-{id}"), 24, 80, None, tx, None).unwrap()
     }
 
     #[test]

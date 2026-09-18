@@ -35,9 +35,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                         // Phase 1 MVP to "no pane appears" on failure,
                         // which doesn't panic or corrupt state — revisit if
                         // spawn failures turn out to be common in practice.
-                        if let Ok(pane) =
-                            Pane::spawn(id, format!("pane-{id}"), 24, 80, Some(&cwd), events_tx)
-                        {
+                        if let Ok(pane) = Pane::spawn(
+                            id,
+                            format!("pane-{id}"),
+                            24,
+                            80,
+                            Some(&cwd),
+                            events_tx,
+                            None,
+                        ) {
                             project.panes.push(pane);
                             project.active_pane = project.panes.len() - 1;
                         }
