@@ -86,6 +86,7 @@ impl Pane {
 
     pub fn kill(&mut self) -> anyhow::Result<()> {
         self.child.kill()?;
+        let _ = self.child.wait();
         Ok(())
     }
 }
