@@ -81,11 +81,13 @@ Single `SOCK_STREAM` Unix socket at `session::data_dir()/attach.sock`. The wire 
 - **Client → keeper, first message**: `sendmsg` with `SCM_RIGHTS` carrying fds `[0, 1]` plus a 1-byte payload: `0x01` = attach, `0x02` = kill (`rustterm -k`). Kill carries no fds.
 - **Keeper → client, response**: one byte — `b'o'` ok (attach accepted), `b'b'` busy (already attached), `b'd'` detaching (clean client exit), `b'q'` quitting (clean client exit), `b'k'` killed. Any EOF = exit too.
 
-**Client (`rustterm -a`)**: connect (failure → remove stale socket, print `rustterm: no detached session`, exit 1) → sendmsg attach + fds → block on read → on any byte or EOF: restore its own tty (`disable_raw_mode`, `LeaveAlternateScreen`, `DisableMouseCapture` on its own stdout — idempotent), exit 0 (`b'q'`/`b'k'`/EOF) or print + exit 1 (`b'b'` → "session busy").
+**Client (`rustterm -a`)**: connect (failure → remove stale socket, print `rustterm: no detached session`, exit 1) → `enable_raw_mode` on its own tty (keeps it raw for the whole attach — Ctrl+C becomes a byte, never SIGINT) → sendmsg attach + fds → block on read → on any byte or EOF: restore its own tty (`disable_raw_mode`, `LeaveAlternateScreen`, `DisableMouseCapture` on its own stdout — idempotent), exit 0 (`b'q'`/`b'k'`/EOF) or print + exit 1 (`b'b'` → "session busy"). A killed client leaves a raw tty — same failure class as any TUI crash (`reset`).
 
-**Keeper on attach**: `recvmsg` → `dup2(recv0 → 0)`, `dup2(recv1 → 1)` → `ratatui::init()` + `EnableMouseCapture` → enter the normal `run()` attached loop. Terminal size needs no protocol — `TIOCGWINSZ` on the dup'd fd reports the client's real size; ratatui's per-frame `autoresize` handles resizes with zero socket traffic.
+**Keeper on attach**: `recvmsg` → `dup2(recv_stdout → 1)` → write `b'o'` → spawn input pump (`read(recv_stdin)` → `write(input_pty_master)`, EOF sets the client-dead flag) → manual terminal init (see below) → enter the normal `run()` attached loop. Terminal size needs no protocol — `TIOCGWINSZ` on the dup'd fd reports the client's real size; ratatui's per-frame `autoresize` handles resizes with zero socket traffic.
 
-**While attached**, the keeper polls the client socket nonblocking each frame: `Ok(0)` (EOF) = client vanished → treat as detach; bytes are ignored.
+**While attached**, the pump thread's `read` hitting EOF means the client vanished → `client_dead` AtomicBool → `run()` treats it as detach; no other client→keeper traffic exists.
+
+**AMENDMENT — input relay via internal PTY (verified against crossterm 0.29 source)**: crossterm's `INTERNAL_EVENT_READER` is a global static created once; `tty_fd()` picks fd 0 only when `isatty(0)`, else `/dev/tty` (unopenable for a ctty-less daemon — `TIOCSCTTY` on a foreign tty needs CAP_SYS_ADMIN). `dup2(client_stdin → 0)` per attach would (a) stale the epoll registration on every reattach and (b) only satisfy isatty while attached. Instead: at daemonize, the keeper opens an **internal pty pair** (`nix::pty::openpty`), sets the slave raw once, and `dup2`s it onto fd 0 **permanently** — fd 0 is then `isatty`-true and epoll-stable for the process lifetime. Per attach, a pump thread copies `recvfd → master`; keystrokes arrive on the keeper's fd 0 unchanged. `enable_raw_mode` calls land on the internal pty (harmless no-ops); the *client* owns real tty termios — it `enable_raw_mode`s its own fds at attach start, which also makes Ctrl+C a byte (never SIGINT) for the whole attach. `ratatui::init()` is skipped in keeper mode — manual `Terminal::new(CrosstermBackend::new(stdout()))` + `EnterAlternateScreen`/`EnableMouseCapture` escapes on fd 1.
 
 **Detach while attached** (`leader d` again): restore terminal on the borrowed fds → send `b'd'` → dup2 stdio back to `/dev/null` → close client socket → return to daemon loop.
 **Quit while attached** (`leader q`/palette): normal quit path — kill panes on `App` drop, `session::save`, send `b'q'`, unlink socket, `exit(0)`.
@@ -112,7 +114,7 @@ Post-fork child must not allocate/lock anything before dropping the guards — `
 
 ### Edge cases
 
-- **Client death while attached**: keeper's per-frame nonblocking read sees EOF → auto-detach (dup2 stdio→/dev/null, back to daemon loop). Client tty left in raw/alt → the *client's own* exit cleanup can't run (it's dead); the tty is gone anyway — no leak.
+- **Client death while attached**: pump thread's `read` sees EOF → `client_dead` flag → `run()` breaks → auto-detach (stdio→/dev/null, back to daemon loop). The tty was the client's — it's gone; no cleanup owed.
 - **`rustterm -a` with dir args** (`rustterm -a foo`): error "attach takes no arguments", exit 2.
 - **Bare `rustterm` while a keeper lives**: starts an independent instance (session.json last-writer-wins on quit — accepted caveat, same as today with two instances).
 - **`leader d` in a second instance while keeper lives**: pre-fork probe connect succeeds → flash refusal.
