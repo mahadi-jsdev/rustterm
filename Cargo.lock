@@ -1863,6 +1863,7 @@ dependencies = [
  "portable-pty",
  "ratatui",
  "regex",
+ "serde",
  "serde_json",
  "tui-term",
  "ureq",

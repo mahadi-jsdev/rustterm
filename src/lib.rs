@@ -10,6 +10,7 @@ pub mod palette;
 pub mod pane;
 pub mod pty;
 pub mod project;
+pub mod session;
 pub mod app;
 pub mod keys;
 pub mod input;

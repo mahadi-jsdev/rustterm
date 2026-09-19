@@ -12,8 +12,18 @@ fn main() -> anyhow::Result<()> {
     // AI-commit worker results arrive here.
     let (app_tx, app_rx) = mpsc::channel::<rustterm::app::AppEvent>();
 
-    let roots = project_roots_from_args();
+    let mut roots = explicit_roots_from_args();
     let mut app = App::new(events_tx.clone(), app_tx.clone());
+    // Bare `rustterm` (no args at all) restores the saved session; explicit
+    // args always win — including the all-invalid-args → cwd fallback.
+    if std::env::args().len() == 1 {
+        if let Some(session) = rustterm::session::load() {
+            app.restore_session(&session);
+        }
+    }
+    if app.projects.is_empty() && roots.is_empty() {
+        roots.push(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    }
     for root in &roots {
         let name = root
             .file_name()
@@ -42,19 +52,19 @@ fn main() -> anyhow::Result<()> {
     let result = run(&mut terminal, &mut app, &events_rx, &app_rx);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
+    if let Err(e) = rustterm::session::save(&app) {
+        eprintln!("rustterm: session save failed: {e}");
+    }
     result
 }
 
-fn project_roots_from_args() -> Vec<std::path::PathBuf> {
+fn explicit_roots_from_args() -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
     for arg in std::env::args().skip(1) {
         match std::fs::canonicalize(&arg) {
             Ok(p) if p.is_dir() => roots.push(p),
             _ => eprintln!("rustterm: skipping {arg:?} — not a directory"),
         }
-    }
-    if roots.is_empty() {
-        roots.push(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
     }
     roots
 }

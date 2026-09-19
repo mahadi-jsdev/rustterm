@@ -240,6 +240,60 @@ impl App {
         }
     }
 
+    /// Rebuild projects/panes from a saved session. Dead roots are
+    /// skipped, missing pane cwds fall back to the project root, and
+    /// spawn failures drop that pane — restore never hard-fails.
+    /// Processes come back as fresh shells replaying `startup_command`.
+    pub fn restore_session(&mut self, s: &crate::session::Session) {
+        for sp in &s.projects {
+            if !sp.root.is_dir() {
+                continue;
+            }
+            let mut project = Project::new(sp.name.clone(), sp.root.clone());
+            project.col_split = sp.col_split.clamp(0.15, 0.85);
+            project.row_split = sp.row_split.clamp(0.15, 0.85);
+            for pp in &sp.panes {
+                let cwd = if pp.cwd.is_dir() { pp.cwd.clone() } else { sp.root.clone() };
+                let id = self.alloc_pane_id();
+                match Pane::spawn(
+                    id,
+                    pp.title.clone(),
+                    24,
+                    80,
+                    Some(&cwd),
+                    self.events_tx.clone(),
+                    pp.startup_command.as_deref(),
+                ) {
+                    Ok(mut pane) => {
+                        pane.hidden = pp.hidden;
+                        pane.color =
+                            pp.color.as_deref().and_then(crate::session::color_from_str);
+                        project.panes.push(pane);
+                    }
+                    Err(_) => continue,
+                }
+            }
+            if !project.panes.is_empty() {
+                project.active_pane = sp.active_pane.min(project.panes.len() - 1);
+                match project.nearest_visible(project.active_pane) {
+                    Some(v) => project.active_pane = v,
+                    None => {
+                        if let Some(i) = project.first_hidden() {
+                            project.panes[i].hidden = false;
+                            project.active_pane = i;
+                        }
+                    }
+                }
+            }
+            self.projects.push(project);
+        }
+        if !self.projects.is_empty() {
+            self.active_project = s.active_project.min(self.projects.len() - 1);
+            self.sidebar_visible = s.sidebar_visible;
+            self.ensure_active_pane();
+        }
+    }
+
     pub fn close_active_pane(&mut self) {
         let mut pane = None;
         let mut project_root = None;
@@ -919,6 +973,102 @@ mod tests {
         assert_eq!(p.panes.len(), 1);
         assert!(!p.panes[0].hidden, "the hidden pane was surfaced");
         assert_eq!(p.active_pane, 0);
+    }
+
+    fn session_fixture() -> crate::session::Session {
+        crate::session::Session {
+            version: 1,
+            active_project: 0,
+            sidebar_visible: false,
+            projects: vec![crate::session::SessionProject {
+                name: "demo".into(),
+                root: PathBuf::from("/tmp"),
+                active_pane: 0,
+                col_split: 0.7,
+                row_split: 0.5,
+                panes: vec![
+                    crate::session::SessionPane {
+                        title: "api".into(),
+                        cwd: PathBuf::from("/tmp"),
+                        startup_command: None,
+                        color: Some("ffb238".into()),
+                        hidden: false,
+                    },
+                    crate::session::SessionPane {
+                        title: "bg-server".into(),
+                        cwd: PathBuf::from("/definitely/not/a/real/dir"),
+                        startup_command: Some("npm run dev".into()),
+                        color: None,
+                        hidden: true,
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn restore_session_rebuilds_projects_and_panes() {
+        let mut app = app_with_projects(&[]);
+        app.restore_session(&session_fixture());
+        assert_eq!(app.projects.len(), 1);
+        assert!(!app.sidebar_visible, "flag restored");
+        let p = &app.projects[0];
+        assert_eq!(p.name, "demo");
+        assert_eq!(p.panes.len(), 2);
+        assert_eq!(p.panes[0].title, "api");
+        assert_eq!(p.panes[0].color, Some(Color::Rgb(0xff, 0xb2, 0x38)));
+        assert!(p.panes[1].hidden, "hidden flag restored");
+        assert_eq!(
+            p.panes[1].cwd,
+            PathBuf::from("/tmp"),
+            "missing cwd falls back to project root"
+        );
+        assert_eq!(
+            p.panes[1].startup_command.as_deref(),
+            Some("npm run dev")
+        );
+        assert!((p.col_split - 0.7).abs() < f32::EPSILON);
+        assert_eq!(p.active_pane, 0);
+    }
+
+    #[test]
+    fn restore_session_skips_dead_roots() {
+        let mut app = app_with_projects(&[]);
+        let mut s = session_fixture();
+        s.projects.push(crate::session::SessionProject {
+            name: "ghost".into(),
+            root: PathBuf::from("/definitely/not/here"),
+            active_pane: 0,
+            col_split: 0.5,
+            row_split: 0.5,
+            panes: vec![],
+        });
+        app.restore_session(&s);
+        assert_eq!(app.projects.len(), 1, "dead root skipped");
+    }
+
+    #[test]
+    fn restore_session_surfaces_pane_when_all_hidden() {
+        let mut app = app_with_projects(&[]);
+        let mut s = session_fixture();
+        s.projects[0].panes[0].hidden = true; // now both hidden
+        app.restore_session(&s);
+        let p = &app.projects[0];
+        assert_eq!(p.visible_count(), 1, "one pane surfaced");
+        assert!(!p.panes[p.active_pane].hidden);
+    }
+
+    #[test]
+    fn restore_session_with_empty_projects_is_noop() {
+        let mut app = app_with_projects(&[]);
+        app.restore_session(&crate::session::Session {
+            version: 1,
+            active_project: 0,
+            sidebar_visible: true,
+            projects: vec![],
+        });
+        assert!(app.projects.is_empty());
+        assert_eq!(app.active_project, 0);
     }
 }
 
