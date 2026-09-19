@@ -175,12 +175,49 @@ impl App {
     }
 
     pub fn ensure_active_pane(&mut self) {
-        let needs = self
-            .active_project()
-            .map(|p| p.panes.is_empty())
-            .unwrap_or(false);
-        if needs {
-            self.spawn_pane(None);
+        if let Some(project) = self.active_project_mut() {
+            if project.panes.is_empty() {
+                // fall through to spawn
+            } else if project.visible_count() == 0 {
+                // All panes backgrounded — surface one rather than spawn.
+                if let Some(i) = project.first_hidden() {
+                    project.panes[i].hidden = false;
+                    project.active_pane = i;
+                }
+                return;
+            } else {
+                return;
+            }
+        }
+        self.spawn_pane(None);
+    }
+
+    /// Leader H — background the active pane. Keeps running (watcher,
+    /// badges, scrollback); restore via palette Unhide entries.
+    pub fn hide_active_pane(&mut self) {
+        let Some(project) = self.active_project_mut() else {
+            return;
+        };
+        if project.visible_count() <= 1 {
+            self.flash("can't hide the last visible pane");
+            return;
+        }
+        let idx = project.active_pane;
+        let title = project.panes[idx].title.clone();
+        project.panes[idx].hidden = true;
+        if let Some(next) = project.nearest_visible(idx) {
+            project.active_pane = next;
+        }
+        self.flash(format!("{title} backgrounded"));
+    }
+
+    /// Restore a hidden pane and focus it (palette Unhide entries).
+    pub fn unhide_pane(&mut self, idx: usize) {
+        if let Some(project) = self.active_project_mut() {
+            if let Some(pane) = project.panes.get_mut(idx) {
+                pane.hidden = false;
+                project.active_pane = idx;
+            }
         }
     }
 
@@ -215,6 +252,21 @@ impl App {
             let _ = removed.kill();
             if project.active_pane >= project.panes.len() && project.active_pane > 0 {
                 project.active_pane -= 1;
+            }
+            // The clamp can leave active_pane on a hidden pane (a hidden
+            // pane slides into the removed index). Snap to the nearest
+            // visible; if none remain, surface a hidden one so the
+            // project never ends up with zero visible panes.
+            if !project.panes.is_empty() {
+                match project.nearest_visible(project.active_pane) {
+                    Some(v) => project.active_pane = v,
+                    None => {
+                        if let Some(i) = project.first_hidden() {
+                            project.panes[i].hidden = false;
+                            project.active_pane = i;
+                        }
+                    }
+                }
             }
             project_root = Some(project.root.clone());
             pane = Some(removed);
@@ -789,6 +841,84 @@ mod tests {
         app.set_active_project(1);
         assert!(app.git_status.is_none());
         assert!(app.sidebar_branch_list.is_empty());
+    }
+
+    #[test]
+    fn hide_active_pane_marks_hidden_and_moves_focus() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.spawn_pane(None); // active = 2
+        app.hide_active_pane();
+        let p = app.active_project().unwrap();
+        assert!(p.panes[2].hidden, "active pane was hidden");
+        assert_eq!(p.active_pane, 1, "focus moved to nearest visible");
+        assert_eq!(p.panes.len(), 3, "hidden pane stays in the vec");
+        assert_eq!(p.hidden_count(), 1);
+    }
+
+    #[test]
+    fn hide_last_visible_pane_is_refused() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.hide_active_pane();
+        let p = app.active_project().unwrap();
+        assert!(!p.panes[0].hidden, "can't hide the only pane");
+        assert!(app.status_msg.is_some());
+    }
+
+    #[test]
+    fn unhide_pane_restores_and_focuses() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.hide_active_pane(); // hides pane 1
+        app.unhide_pane(1);
+        let p = app.active_project().unwrap();
+        assert!(!p.panes[1].hidden);
+        assert_eq!(p.active_pane, 1, "restored pane takes focus");
+    }
+
+    #[test]
+    fn ensure_active_pane_surfaces_hidden_instead_of_spawning() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        // Force the all-hidden state (the leader guard normally prevents it).
+        app.active_project_mut().unwrap().panes[0].hidden = true;
+        app.ensure_active_pane();
+        let p = app.active_project().unwrap();
+        assert_eq!(p.panes.len(), 1, "no extra pane spawned");
+        assert!(!p.panes[0].hidden, "the hidden pane was surfaced");
+        assert_eq!(p.active_pane, 0);
+    }
+
+    #[test]
+    fn close_pane_skips_focus_past_hidden() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        // Hide pane 0, keep active on pane 2, then close pane 2 — the clamp
+        // lands on index 1 (visible), not the hidden pane 0.
+        app.active_project_mut().unwrap().panes[0].hidden = true;
+        app.close_active_pane();
+        let p = app.active_project().unwrap();
+        assert_eq!(p.panes.len(), 2);
+        assert_eq!(p.active_pane, 1);
+        assert!(!p.panes[p.active_pane].hidden);
+    }
+
+    #[test]
+    fn closing_last_visible_pane_surfaces_a_hidden_one() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.active_project_mut().unwrap().panes[0].hidden = true;
+        app.close_active_pane(); // closes visible pane 1
+        let p = app.active_project().unwrap();
+        assert_eq!(p.panes.len(), 1);
+        assert!(!p.panes[0].hidden, "the hidden pane was surfaced");
+        assert_eq!(p.active_pane, 0);
     }
 }
 

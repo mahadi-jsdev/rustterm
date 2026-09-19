@@ -35,6 +35,9 @@ pub struct Pane {
     pub watcher: Watcher,
     pub startup_command: Option<String>,
     pub search: Option<crate::search::SearchState>,
+    /// Backgrounded panes keep running (PTY alive, watcher + badges
+    /// active) but drop out of the render grid and pane navigation.
+    pub hidden: bool,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -94,6 +97,7 @@ impl Pane {
             watcher: Watcher::new(),
             startup_command: startup_command.map(String::from),
             search: None,
+            hidden: false,
             writer: spawned.writer,
             master: spawned.master,
             child: spawned.child,

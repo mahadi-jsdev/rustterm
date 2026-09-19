@@ -107,9 +107,16 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
     let Some(project) = app.active_project() else {
         return;
     };
-    let rects = pane_rects(area, project.panes.len(), project.col_split, project.row_split);
-    for (index, (pane, rect)) in project.panes.iter().zip(rects.iter()).enumerate() {
-        sync_pane_size(pane, *rect);
+    let visible: Vec<(usize, &crate::pane::Pane)> = project
+        .panes
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.hidden)
+        .collect();
+    let rects = pane_rects(area, visible.len(), project.col_split, project.row_split);
+    for ((index, pane), rect) in visible.iter().zip(rects.iter()) {
+        let index = *index;
+        sync_pane_size(*pane, *rect);
         let mut title = pane.title.clone();
         if pane.waiting {
             title.push_str(" ●");
@@ -152,7 +159,7 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
         let widget = PseudoTerminal::new(screen).block(block).cursor(cursor);
         frame.render_widget(widget, *rect);
         drop(parser); // highlight_matches re-locks for the scrollback math
-        highlight_matches(frame, pane, *rect);
+        highlight_matches(frame, *pane, *rect);
     }
 }
 
@@ -223,10 +230,19 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                         }
                     })
                     .unwrap_or("");
-                format!("Ctrl+A for commands{state}")
+                let hidden = app
+                    .active_project()
+                    .map(|p| p.panes.iter().filter(|p| p.hidden).count())
+                    .unwrap_or(0);
+                let bg = if hidden > 0 {
+                    format!("  +{hidden} hidden")
+                } else {
+                    String::new()
+                };
+                format!("Ctrl+A for commands{state}{bg}")
             }
             InputMode::Leader => {
-                "n new  x close  h/l switch  [ ] project  +/- split  :/p palette  c add-project  b sidebar  g git  G lazygit  f find  / search  q quit"
+                "n new  x close  h/l switch  H hide  [ ] project  +/- split  :/p palette  c add-project  b sidebar  g git  G lazygit  f find  / search  q quit"
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),

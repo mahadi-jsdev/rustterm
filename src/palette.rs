@@ -9,6 +9,8 @@ pub enum CmdId {
     NextPane,
     PrevPane,
     JumpPane(usize),
+    HidePane,
+    UnhidePane(usize),
     IncSplit,
     DecSplit,
     AddProject,
@@ -39,12 +41,20 @@ impl Palette {
         items.push(Command { id: CmdId::ClosePane, label: "Close pane".into() });
         items.push(Command { id: CmdId::NextPane, label: "Next pane".into() });
         items.push(Command { id: CmdId::PrevPane, label: "Previous pane".into() });
+        items.push(Command { id: CmdId::HidePane, label: "Hide pane (background)".into() });
         if let Some(project) = app.active_project() {
             for (i, pane) in project.panes.iter().enumerate() {
-                items.push(Command {
-                    id: CmdId::JumpPane(i),
-                    label: format!("Jump to pane {}: {}", i + 1, pane.title),
-                });
+                if pane.hidden {
+                    items.push(Command {
+                        id: CmdId::UnhidePane(i),
+                        label: format!("Unhide pane: {}", pane.title),
+                    });
+                } else {
+                    items.push(Command {
+                        id: CmdId::JumpPane(i),
+                        label: format!("Jump to pane {}: {}", i + 1, pane.title),
+                    });
+                }
             }
         }
         items.push(Command { id: CmdId::IncSplit, label: "Increase split".into() });
@@ -164,11 +174,13 @@ pub fn execute(app: &mut App, id: &CmdId) {
         }
         CmdId::JumpPane(i) => {
             if let Some(p) = app.active_project_mut() {
-                if *i < p.panes.len() {
+                if *i < p.panes.len() && !p.panes[*i].hidden {
                     p.active_pane = *i;
                 }
             }
         }
+        CmdId::HidePane => app.hide_active_pane(),
+        CmdId::UnhidePane(i) => app.unhide_pane(*i),
         CmdId::IncSplit => app.adjust_split(0.05),
         CmdId::DecSplit => app.adjust_split(-0.05),
         CmdId::AddProject => {
@@ -281,5 +293,52 @@ mod tests {
         );
         assert!(!app.ai_in_flight, "no worker without a repo/key");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn palette_lists_unhide_for_hidden_and_jump_for_visible() {
+        let mut app = app_with_projects(&["demo"]);
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.active_project_mut().unwrap().panes[1].hidden = true;
+
+        let p = Palette::open(&app);
+        let ids: Vec<&CmdId> = p.items.iter().map(|c| &c.id).collect();
+        assert!(ids.contains(&&CmdId::JumpPane(0)), "visible pane is a jump target");
+        assert!(ids.contains(&&CmdId::JumpPane(2)));
+        assert!(ids.contains(&&CmdId::UnhidePane(1)), "hidden pane is an unhide target");
+        assert!(!ids.contains(&&CmdId::JumpPane(1)), "hidden pane is not jumpable");
+        let label = p
+            .items
+            .iter()
+            .find(|c| c.id == CmdId::UnhidePane(1))
+            .map(|c| c.label.as_str())
+            .unwrap();
+        assert!(label.contains("Unhide"), "label: {label}");
+    }
+
+    #[test]
+    fn execute_unhide_restores_and_focuses_pane() {
+        let mut app = app_with_projects(&["demo"]);
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.hide_active_pane(); // hides pane 1, focus to 0
+
+        execute(&mut app, &CmdId::UnhidePane(1));
+        let p = app.active_project().unwrap();
+        assert!(!p.panes[1].hidden);
+        assert_eq!(p.active_pane, 1);
+    }
+
+    #[test]
+    fn execute_hide_backgrounds_active_pane() {
+        let mut app = app_with_projects(&["demo"]);
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        execute(&mut app, &CmdId::HidePane);
+        let p = app.active_project().unwrap();
+        assert!(p.panes[1].hidden);
+        assert_eq!(p.active_pane, 0);
     }
 }

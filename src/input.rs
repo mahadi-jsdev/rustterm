@@ -22,10 +22,11 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
         return;
     };
     let (_, main, _) = crate::layout::frame_areas(frame_area, sidebar_visible);
-    let rects = crate::layout::pane_rects(main, project.panes.len(), project.col_split, project.row_split);
+    let visible: Vec<&crate::pane::Pane> =
+        project.panes.iter().filter(|p| !p.hidden).collect();
+    let rects = crate::layout::pane_rects(main, visible.len(), project.col_split, project.row_split);
     let pos = Position::new(mouse.column, mouse.row);
-    let Some((pane, rect)) = project
-        .panes
+    let Some((pane, rect)) = visible
         .iter()
         .zip(rects.iter())
         .find(|(_, r)| r.contains(pos))
@@ -119,6 +120,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Char('b') => app.toggle_sidebar(),
                 KeyCode::Char('g') => app.enter_sidebar(),
                 KeyCode::Char('G') => app.spawn_pane(Some("lazygit")),
+                KeyCode::Char('H') => app.hide_active_pane(),
                 KeyCode::Char('f') => app.open_finder(),
                 KeyCode::Char('/') => {
                     app.line_input = Some(LineEdit::new());
@@ -452,6 +454,20 @@ mod tests {
     }
 
     #[test]
+    fn leader_h_backgrounds_active_pane() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_pane(None); // active = pane 1
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('H'), KeyModifiers::NONE));
+        let p = app.active_project().unwrap();
+        assert!(p.panes[1].hidden);
+        assert_eq!(p.active_pane, 0);
+        assert_eq!(p.panes.len(), 2, "PTY stays alive in the vec");
+        assert!(matches!(app.mode, InputMode::Normal));
+    }
+
+    #[test]
     fn leader_b_toggles_sidebar_visibility() {
         let mut app = app_with_one_project();
         assert!(app.sidebar_visible);
@@ -597,6 +613,36 @@ mod tests {
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 5, 10), frame); // sidebar
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 23), frame); // status row
         assert_eq!(pane_scrollback(&app), 0);
+    }
+
+    #[test]
+    fn wheel_maps_visible_rects_to_real_pane_indices() {
+        // Two panes side by side; hide pane 0 → pane 1 takes the whole main
+        // area. A wheel event anywhere must scroll pane 1, not hit a rect
+        // still reserved for the hidden pane.
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.active_project_mut().unwrap().panes[0].hidden = true;
+        {
+            let pane = &app.active_project().unwrap().panes[1];
+            let mut p = pane.parser.lock().unwrap();
+            for _ in 0..40 {
+                p.process(b"line\r\n");
+            }
+        }
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::ScrollUp, 40, 10),
+            Rect::new(0, 0, 80, 24),
+        );
+        let s = app.active_project().unwrap().panes[1]
+            .parser
+            .lock()
+            .unwrap()
+            .screen()
+            .scrollback();
+        assert_eq!(s, SCROLL_LINES);
     }
 
     #[test]
