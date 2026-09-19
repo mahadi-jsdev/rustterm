@@ -12,6 +12,7 @@ pub enum CmdId {
     IncSplit,
     DecSplit,
     AddProject,
+    AiCommit,
     SwitchProject(usize),
     CloseProject,
     ReopenPane,
@@ -49,6 +50,7 @@ impl Palette {
         items.push(Command { id: CmdId::IncSplit, label: "Increase split".into() });
         items.push(Command { id: CmdId::DecSplit, label: "Decrease split".into() });
         items.push(Command { id: CmdId::AddProject, label: "Add project…".into() });
+        items.push(Command { id: CmdId::AiCommit, label: "Git: AI commit".into() });
         for (i, project) in app.projects.iter().enumerate() {
             items.push(Command {
                 id: CmdId::SwitchProject(i),
@@ -173,6 +175,7 @@ pub fn execute(app: &mut App, id: &CmdId) {
             app.mode = InputMode::LineInput(LinePurpose::AddProject);
             app.line_input = Some(LineEdit::new());
         }
+        CmdId::AiCommit => app.start_ai_commit(),
         CmdId::SwitchProject(i) => app.set_active_project(*i),
         CmdId::CloseProject => app.close_active_project(),
         CmdId::ReopenPane => app.reopen_last_pane(),
@@ -199,7 +202,8 @@ mod tests {
 
     fn app_with_projects(names: &[&str]) -> App {
         let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
         for n in names {
             app.projects.push(Project::new((*n).into(), PathBuf::from("/tmp")));
         }
@@ -250,5 +254,32 @@ mod tests {
         assert_eq!(p.selected_command().map(|c| &c.id), Some(&CmdId::Quit));
         p.move_prev();
         assert_eq!(p.selected_command().map(|c| &c.id), Some(&CmdId::Quit));
+    }
+
+    #[test]
+    fn palette_lists_ai_commit_and_execute_invokes_it() {
+        let mut app = app_with_projects(&["demo"]);
+        // Point at a non-repo dir so start_ai_commit fast-fails
+        // deterministically — it reports every path via flash.
+        let root = std::env::temp_dir().join(format!("rustterm-palette-ai-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        app.projects[0].root = root.clone();
+
+        let p = Palette::open(&app);
+        assert!(
+            p.items
+                .iter()
+                .any(|c| c.id == CmdId::AiCommit && c.label == "Git: AI commit"),
+            "palette must list the AI-commit command"
+        );
+
+        execute(&mut app, &CmdId::AiCommit);
+        assert!(
+            app.status_msg.is_some(),
+            "execute(AiCommit) must route to start_ai_commit (flashes on every path)"
+        );
+        assert!(!app.ai_in_flight, "no worker without a repo/key");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

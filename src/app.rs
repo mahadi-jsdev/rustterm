@@ -11,6 +11,9 @@ pub enum InputMode {
     Normal,
     Leader,
     Palette,
+    Sidebar,
+    Finder,
+    Search,
     LineInput(LinePurpose),
 }
 
@@ -18,6 +21,16 @@ pub enum InputMode {
 pub enum LinePurpose {
     AddProject,
     RenamePane,
+    CommitMsg,
+    Search,
+}
+
+pub enum AppEvent {
+    GitStatus { root: PathBuf, status: Option<crate::git::GitStatus> },
+    /// `root` is the project root polled when the worker started — the
+    /// commit must target THAT repo even if the user switched projects
+    /// while the request was in flight.
+    AiMessage { root: PathBuf, result: Result<String, String> },
 }
 
 pub struct App {
@@ -32,6 +45,22 @@ pub struct App {
     pub line_input: Option<LineEdit>,
     pub palette: Option<crate::palette::Palette>,
     pub last_watch_poll: Instant,
+    pub app_tx: mpsc::Sender<AppEvent>,
+    pub sidebar_sel: usize,
+    pub sidebar_branches: bool,
+    /// Cached branch list — populated on enter_sidebar/toggle so the
+    /// renderer and len helpers never shell out to git per frame.
+    pub sidebar_branch_list: Vec<String>,
+    pub git_status: Option<crate::git::GitStatus>,
+    pub git_poll_in_flight: bool,
+    pub last_git_poll: Instant,
+    pub finder: Option<crate::finder::FinderState>,
+    /// Root captured when the AI-commit worker started — the CommitMsg
+    /// prompt commits HERE, not the currently-active project.
+    pub commit_root: Option<PathBuf>,
+    /// One AI-commit worker at a time — set before spawn, cleared when
+    /// the AppEvent::AiMessage result is drained.
+    pub ai_in_flight: bool,
 }
 
 pub struct ClosedPane {
@@ -45,7 +74,7 @@ pub struct ClosedPane {
 }
 
 impl App {
-    pub fn new(events_tx: mpsc::Sender<PaneEvent>) -> App {
+    pub fn new(events_tx: mpsc::Sender<PaneEvent>, app_tx: mpsc::Sender<AppEvent>) -> App {
         App {
             projects: Vec::new(),
             active_project: 0,
@@ -58,6 +87,16 @@ impl App {
             line_input: None,
             palette: None,
             last_watch_poll: Instant::now(),
+            app_tx,
+            sidebar_sel: 0,
+            sidebar_branches: false,
+            sidebar_branch_list: vec![],
+            git_status: None,
+            git_poll_in_flight: false,
+            last_git_poll: Instant::now(),
+            finder: None,
+            commit_root: None,
+            ai_in_flight: false,
         }
     }
 
@@ -72,6 +111,7 @@ impl App {
     pub fn next_project(&mut self) {
         if !self.projects.is_empty() {
             self.active_project = (self.active_project + 1) % self.projects.len();
+            self.clear_git_cache();
         }
     }
 
@@ -82,7 +122,15 @@ impl App {
             } else {
                 self.active_project - 1
             };
+            self.clear_git_cache();
         }
+    }
+
+    /// Drop the cached git view on project switch — it belongs to the
+    /// previously-active root. The next 1s poll repopulates it.
+    fn clear_git_cache(&mut self) {
+        self.git_status = None;
+        self.sidebar_branch_list.clear();
     }
 
     pub fn alloc_pane_id(&mut self) -> u32 {
@@ -112,12 +160,14 @@ impl App {
         self.projects.push(Project::new(name, root));
         self.active_project = self.projects.len() - 1;
         self.ensure_active_pane();
+        self.clear_git_cache();
     }
 
     pub fn set_active_project(&mut self, idx: usize) {
         if idx < self.projects.len() {
             self.active_project = idx;
             self.ensure_active_pane();
+            self.clear_git_cache();
         }
     }
 
@@ -242,6 +292,184 @@ impl App {
             }
         }
     }
+
+    pub fn active_root(&self) -> Option<PathBuf> {
+        self.active_project().map(|p| p.root.clone())
+    }
+
+    pub fn enter_sidebar(&mut self) {
+        if let Some(root) = self.active_root() {
+            self.git_status = crate::git::status(&root); // instant refresh
+            self.sidebar_branch_list = crate::git::branches(&root);
+        }
+        self.sidebar_sel = 0;
+        self.sidebar_branches = false;
+        self.mode = InputMode::Sidebar;
+    }
+
+    /// Toggle file↔branch list; refreshes the cached branch list.
+    pub fn sidebar_toggle_branches(&mut self) {
+        self.sidebar_branches = !self.sidebar_branches;
+        self.sidebar_sel = 0;
+        if self.sidebar_branches {
+            if let Some(root) = self.active_root() {
+                self.sidebar_branch_list = crate::git::branches(&root);
+            }
+        }
+    }
+
+    /// Rows in the active sidebar list (files or branches).
+    pub fn sidebar_items_len(&self) -> usize {
+        if self.sidebar_branches {
+            self.sidebar_branch_list.len()
+        } else {
+            self.git_status.as_ref().map(|s| s.files.len()).unwrap_or(0)
+        }
+    }
+
+    /// Move the sidebar selection, clamped to the current list.
+    pub fn sidebar_move(&mut self, delta: i32) {
+        let n = self.sidebar_items_len();
+        if n == 0 {
+            self.sidebar_sel = 0;
+            return;
+        }
+        let cur = self.sidebar_sel as i32;
+        self.sidebar_sel = (cur + delta).clamp(0, n as i32 - 1) as usize;
+    }
+
+    pub fn sidebar_selected_file(&self) -> Option<String> {
+        self.git_status
+            .as_ref()?
+            .files
+            .get(self.sidebar_sel)
+            .map(|f| f.path.clone())
+    }
+
+    pub fn sidebar_selected_branch(&self) -> Option<String> {
+        self.sidebar_branch_list.get(self.sidebar_sel).cloned()
+    }
+
+    pub fn open_finder(&mut self) {
+        if let Some(root) = self.active_root() {
+            self.finder = Some(crate::finder::FinderState::open(&root));
+            self.mode = InputMode::Finder;
+        }
+    }
+
+    /// Stage everything, snapshot the diff, and kick off the worker that
+    /// posts AppEvent::AiMessage. Fast-fails inline (flash) when there's
+    /// nothing to send or no API key. Only one worker at a time —
+    /// `ai_in_flight` is cleared when the result event is drained.
+    pub fn start_ai_commit(&mut self) {
+        if self.ai_in_flight {
+            self.flash("ai commit already running");
+            return;
+        }
+        let Some(root) = self.active_root() else { return };
+        if let Err(e) = crate::git::add_all(&root) {
+            self.flash(format!("git add: {e}"));
+            return;
+        }
+        let diff = match crate::git::staged_diff(&root) {
+            Ok(d) => d,
+            Err(e) => {
+                self.flash(format!("git diff: {e}"));
+                return;
+            }
+        };
+        if diff.trim().is_empty() {
+            self.flash("nothing to commit");
+            return;
+        }
+        let key = match std::env::var("OPENAI_API_KEY") {
+            Ok(k) if !k.is_empty() => k,
+            _ => {
+                self.flash("OPENAI_API_KEY not set");
+                return;
+            }
+        };
+        let tx = self.app_tx.clone();
+        self.ai_in_flight = true;
+        std::thread::spawn(move || {
+            let r = crate::ai_commit::generate_message(&diff, &key);
+            let _ = tx.send(AppEvent::AiMessage { root, result: r });
+        });
+        self.flash("generating commit message…");
+    }
+
+    /// vim-style / — find matches in the focused pane, jump to the last.
+    pub fn start_search(&mut self, query: &str) {
+        let Some(project) = self.active_project_mut() else { return };
+        let Some(pane) = project.active_pane_mut() else { return };
+        let matches = pane
+            .parser
+            .lock()
+            .map(|mut p| crate::search::find_matches(p.screen_mut(), query))
+            .unwrap_or_default();
+        if matches.is_empty() {
+            self.flash(format!("no matches: {query}"));
+            return;
+        }
+        let idx = matches.len() - 1;
+        pane.search = Some(crate::search::SearchState {
+            query: query.to_string(),
+            matches,
+            idx,
+        });
+        self.apply_search_scroll();
+        self.mode = InputMode::Search;
+    }
+
+    pub fn search_next(&mut self) {
+        if let Some(project) = self.active_project_mut() {
+            if let Some(pane) = project.active_pane_mut() {
+                if let Some(s) = pane.search.as_mut() {
+                    s.next();
+                }
+            }
+        }
+        self.apply_search_scroll();
+    }
+
+    pub fn search_prev(&mut self) {
+        if let Some(project) = self.active_project_mut() {
+            if let Some(pane) = project.active_pane_mut() {
+                if let Some(s) = pane.search.as_mut() {
+                    s.prev();
+                }
+            }
+        }
+        self.apply_search_scroll();
+    }
+
+    /// Exit search mode AND clear the pane's search state (any exit path).
+    pub fn exit_search(&mut self) {
+        if let Some(project) = self.active_project_mut() {
+            if let Some(pane) = project.active_pane_mut() {
+                pane.search = None;
+            }
+        }
+        self.mode = InputMode::Normal;
+    }
+
+    fn apply_search_scroll(&mut self) {
+        if let Some(project) = self.active_project() {
+            if let Some(pane) = project.active_pane() {
+                if let Some(s) = &pane.search {
+                    if let Some(m) = s.current() {
+                        let total = pane
+                            .parser
+                            .lock()
+                            .map(|mut p| crate::search::scrollback_len(p.screen_mut()))
+                            .unwrap_or(0);
+                        let off = crate::search::offset_for_row(total, m.row);
+                        pane.set_scroll(off);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -251,17 +479,23 @@ mod tests {
 
     fn app_with_projects(names: &[&str]) -> App {
         let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
         for name in names {
             app.projects.push(Project::new((*name).into(), PathBuf::from("/tmp")));
         }
         app
     }
 
+    fn app_with_one_project() -> App {
+        app_with_projects(&["demo"])
+    }
+
     #[test]
     fn new_app_has_no_projects_and_normal_mode() {
         let (tx, _rx) = mpsc::channel();
-        let app = App::new(tx);
+        let (atx, _arx) = mpsc::channel();
+        let app = App::new(tx, atx);
         assert_eq!(app.projects.len(), 0);
         assert!(matches!(app.mode, InputMode::Normal));
         assert!(!app.should_quit);
@@ -270,7 +504,8 @@ mod tests {
     #[test]
     fn active_project_is_none_when_empty() {
         let (tx, _rx) = mpsc::channel();
-        let app = App::new(tx);
+        let (atx, _arx) = mpsc::channel();
+        let app = App::new(tx, atx);
         assert!(app.active_project().is_none());
     }
 
@@ -293,7 +528,8 @@ mod tests {
     #[test]
     fn alloc_pane_id_increments() {
         let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
         assert_eq!(app.alloc_pane_id(), 0);
         assert_eq!(app.alloc_pane_id(), 1);
         assert_eq!(app.alloc_pane_id(), 2);
@@ -432,6 +668,115 @@ mod tests {
         assert_eq!(expand_tilde("~/x"), PathBuf::from(format!("{home}/x")));
         assert_eq!(expand_tilde("/abs"), PathBuf::from("/abs"));
     }
+
+    #[test]
+    fn sidebar_items_len_follows_files_or_branches() {
+        let mut app = app_with_one_project();
+        app.git_status = Some(crate::git::GitStatus {
+            branch: "main".into(),
+            files: vec![
+                crate::git::ChangedFile { status: 'M', path: "a".into() },
+                crate::git::ChangedFile { status: '?', path: "b".into() },
+            ],
+        });
+        assert_eq!(app.sidebar_items_len(), 2);
+        app.sidebar_branches = true;
+        app.sidebar_branch_list = vec!["main".into(), "dev".into()];
+        assert_eq!(app.sidebar_items_len(), 2);
+    }
+
+    #[test]
+    fn sidebar_move_clamps_selection() {
+        let mut app = app_with_one_project();
+        app.git_status = Some(crate::git::GitStatus {
+            branch: "m".into(),
+            files: vec![crate::git::ChangedFile { status: 'M', path: "a".into() }],
+        });
+        app.sidebar_move(1);
+        assert_eq!(app.sidebar_sel, 0); // wraps or clamps to len-1
+        app.sidebar_move(-1);
+        assert_eq!(app.sidebar_sel, 0);
+    }
+
+    #[test]
+    fn start_search_populates_pane_state_and_mode() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            pane.parser.lock().unwrap().process(b"hello world\r\n");
+        }
+        app.start_search("hello");
+        assert!(matches!(app.mode, InputMode::Search));
+        let pane = &app.active_project().unwrap().panes[0];
+        assert_eq!(pane.search.as_ref().unwrap().matches.len(), 1);
+    }
+
+    #[test]
+    fn start_search_with_no_matches_flashes_and_stays_normal() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.start_search("zzz-no-match");
+        assert!(matches!(app.mode, InputMode::Normal));
+        assert!(app.status_msg.is_some());
+    }
+
+    #[test]
+    fn exit_search_clears_pane_state_and_mode() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            pane.parser.lock().unwrap().process(b"needle\r\n");
+        }
+        app.start_search("needle");
+        app.exit_search();
+        assert!(matches!(app.mode, InputMode::Normal));
+        assert!(app.active_project().unwrap().panes[0].search.is_none());
+    }
+
+    #[test]
+    fn commit_root_survives_project_switch() {
+        // The AI worker carries the root it polled; the CommitMsg submit path
+        // must use THAT root even when the user switched projects mid-request.
+        let mut app = app_with_projects(&["a", "b"]);
+        app.projects[0].root = PathBuf::from("/tmp");
+        app.projects[1].root = PathBuf::from("/etc");
+
+        // AiMessage drain stores the polled root, then the user switches.
+        app.commit_root = Some(PathBuf::from("/tmp"));
+        app.set_active_project(1);
+        assert_eq!(app.active_root(), Some(PathBuf::from("/etc")));
+
+        // The submit path reads commit_root FIRST — same expression as
+        // input.rs's CommitMsg arm — so the polled root wins.
+        let root = app
+            .commit_root
+            .take()
+            .unwrap_or_else(|| app.active_root().unwrap_or_default());
+        assert_eq!(root, PathBuf::from("/tmp"));
+        assert!(app.commit_root.is_none(), "take() consumes the stored root");
+
+        // With no stored root the fallback is the active project.
+        let root = app
+            .commit_root
+            .take()
+            .unwrap_or_else(|| app.active_root().unwrap_or_default());
+        assert_eq!(root, PathBuf::from("/etc"));
+    }
+
+    #[test]
+    fn project_switch_clears_cached_git_view() {
+        let mut app = app_with_projects(&["a", "b"]);
+        app.git_status = Some(crate::git::GitStatus {
+            branch: "main".into(),
+            files: vec![crate::git::ChangedFile { status: 'M', path: "x".into() }],
+        });
+        app.sidebar_branch_list = vec!["main".into()];
+        app.set_active_project(1);
+        assert!(app.git_status.is_none());
+        assert!(app.sidebar_branch_list.is_empty());
+    }
 }
 
 pub fn expand_tilde(path: &str) -> PathBuf {
@@ -447,4 +792,9 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+/// Single-quote a path for embedding in a shell command line.
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }

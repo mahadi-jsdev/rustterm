@@ -115,6 +115,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     app.line_input = Some(edit);
                     app.mode = InputMode::LineInput(LinePurpose::AddProject);
                 }
+                KeyCode::Char('g') => app.enter_sidebar(),
+                KeyCode::Char('G') => app.spawn_pane(Some("lazygit")),
+                KeyCode::Char('f') => app.open_finder(),
+                KeyCode::Char('/') => {
+                    app.line_input = Some(LineEdit::new());
+                    app.mode = InputMode::LineInput(LinePurpose::Search);
+                }
                 _ => {}
             }
             // Project switch lands on ensure-pane.
@@ -159,6 +166,111 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             }
         }
+        InputMode::Sidebar => {
+            // Ctrl+A works from every non-text-entry mode — re-enter Leader
+            // before any sidebar-local key handling.
+            if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.mode = InputMode::Leader;
+                return;
+            }
+            match key.code {
+                KeyCode::Esc => {
+                    app.mode = InputMode::Normal;
+                }
+                // Plain-char bindings require NO modifiers — otherwise e.g.
+                // Ctrl+C would run `git add -A` via the 'c' binding. (Ctrl+A
+                // is intercepted above and can't reach this match.)
+                KeyCode::Char('h') | KeyCode::Char('g') if key.modifiers.is_empty() => {
+                    app.mode = InputMode::Normal;
+                }
+                KeyCode::Char('j') if key.modifiers.is_empty() => app.sidebar_move(1),
+                KeyCode::Down => app.sidebar_move(1),
+                KeyCode::Char('k') if key.modifiers.is_empty() => app.sidebar_move(-1),
+                KeyCode::Up => app.sidebar_move(-1),
+                KeyCode::Char('b') if key.modifiers.is_empty() => app.sidebar_toggle_branches(),
+                KeyCode::Char('c') if key.modifiers.is_empty() => app.start_ai_commit(),
+                KeyCode::Enter => {
+                    if app.sidebar_branches {
+                        if let (Some(root), Some(branch)) =
+                            (app.active_root(), app.sidebar_selected_branch())
+                        {
+                            match crate::git::switch(&root, &branch) {
+                                Ok(()) => {
+                                    app.git_status = crate::git::status(&root);
+                                    app.flash(format!("switched to {branch}"));
+                                }
+                                Err(e) => app.flash(format!("git switch: {e}")),
+                            }
+                        }
+                    } else if let Some(file) = app.sidebar_selected_file() {
+                        // `diff HEAD` covers staged AND unstaged changes —
+                        // plain `diff` leaves staged edits invisible.
+                        let cmd = format!(
+                            "git --no-pager diff HEAD --color=always -- {}",
+                            crate::app::shell_quote(&file)
+                        );
+                        app.spawn_pane(Some(&cmd));
+                    }
+                }
+                _ => {}
+            }
+        }
+        InputMode::Finder => {
+            let Some(f) = app.finder.as_mut() else {
+                app.mode = InputMode::Normal;
+                return;
+            };
+            match key.code {
+                KeyCode::Esc => {
+                    app.finder = None;
+                    app.mode = InputMode::Normal;
+                }
+                KeyCode::Enter => {
+                    if let Some(path) = f.selected_path() {
+                        // $VISUAL → $EDITOR → nvim (spec: nvim-primary, no vi).
+                        let editor = std::env::var("VISUAL")
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
+                            .unwrap_or_else(|| "nvim".to_string());
+                        let cmd =
+                            format!("{} {}", editor, crate::app::shell_quote(&path.to_string_lossy()));
+                        app.finder = None;
+                        app.mode = InputMode::Normal;
+                        app.spawn_pane(Some(&cmd));
+                    }
+                }
+                KeyCode::Up => f.move_prev(),
+                KeyCode::Down => f.move_next(),
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => f.move_prev(),
+                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => f.move_next(),
+                KeyCode::Backspace => {
+                    let mut q = f.query.clone();
+                    q.pop();
+                    f.set_query(q);
+                }
+                KeyCode::Char(c) => {
+                    let mut q = f.query.clone();
+                    q.push(c);
+                    f.set_query(q);
+                }
+                _ => {}
+            }
+        }
+        InputMode::Search => {
+            // Ctrl+A exits search AND re-enters Leader — consistent with
+            // every other non-text-entry mode.
+            if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.exit_search();
+                app.mode = InputMode::Leader;
+                return;
+            }
+            match key.code {
+                KeyCode::Char('n') => app.search_next(),
+                KeyCode::Char('N') => app.search_prev(),
+                _ => app.exit_search(), // Esc, Enter, and ANY other key exits
+            }
+        }
         InputMode::LineInput(purpose) => {
             let Some(edit) = app.line_input.as_mut() else {
                 app.mode = InputMode::Normal;
@@ -179,6 +291,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 EditResult::Editing => {}
                 EditResult::Cancel => {
                     app.line_input = None;
+                    app.commit_root = None;
                     app.mode = InputMode::Normal;
                 }
                 EditResult::Submit(text) => match purpose {
@@ -208,6 +321,35 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                         app.line_input = None;
                         app.mode = InputMode::Normal;
                     }
+                    LinePurpose::CommitMsg => {
+                        let msg = text.trim().to_string();
+                        // Commit to the root the AI worker polled — the user
+                        // may have switched projects while it generated the
+                        // message. Fall back to the active root for manually
+                        // opened prompts.
+                        let root = app
+                            .commit_root
+                            .take()
+                            .unwrap_or_else(|| app.active_root().unwrap_or_default());
+                        if msg.is_empty() {
+                            app.flash("commit aborted: empty message");
+                        } else {
+                            match crate::git::commit(&root, &msg) {
+                                Ok(hash) => app.flash(format!("committed {hash}")),
+                                Err(e) => app.flash(format!("git commit: {e}")),
+                            }
+                        }
+                        app.line_input = None;
+                        app.mode = InputMode::Normal;
+                    }
+                    LinePurpose::Search => {
+                        app.line_input = None;
+                        app.start_search(text.trim());
+                        // start_search sets mode=Search on match; ensure Normal on empty:
+                        if !matches!(app.mode, InputMode::Search) {
+                            app.mode = InputMode::Normal;
+                        }
+                    }
                 },
             }
         }
@@ -223,7 +365,8 @@ mod tests {
 
     fn app_with_one_project() -> App {
         let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app
     }
@@ -491,5 +634,115 @@ mod tests {
         assert_eq!(pane_scrollback(&app), 5);
         handle_key(&mut app, key(KeyCode::Char('x'), KeyModifiers::NONE));
         assert_eq!(pane_scrollback(&app), 0);
+    }
+
+    #[test]
+    fn leader_g_enters_sidebar_and_h_exits() {
+        let mut app = app_with_one_project();
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Sidebar));
+        handle_key(&mut app, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Normal));
+    }
+
+    #[test]
+    fn leader_capital_g_spawns_lazygit_pane() {
+        let mut app = app_with_one_project();
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        let pane = &app.active_project().unwrap().panes[0];
+        assert_eq!(pane.startup_command.as_deref(), Some("lazygit"));
+    }
+
+    #[test]
+    fn leader_f_opens_finder_and_esc_closes() {
+        let mut app = app_with_one_project(); // root /tmp — has files
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Finder));
+        assert!(app.finder.is_some());
+        handle_key(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Normal));
+        assert!(app.finder.is_none());
+    }
+
+    #[test]
+    fn finder_enter_spawns_editor_pane() {
+        let mut app = app_with_one_project();
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('f'), KeyModifiers::NONE));
+        handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
+        let pane = &app.active_project().unwrap().panes[0];
+        assert!(pane.startup_command.is_some());
+        let cmd = pane.startup_command.clone().unwrap();
+        assert!(cmd.contains("host") || cmd.contains('/'), "expected editor command, got {cmd}");
+    }
+
+    #[test]
+    fn leader_slash_opens_search_prompt_and_enter_searches() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            pane.parser.lock().unwrap().process(b"searchable\r\n");
+        }
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::LineInput(LinePurpose::Search)));
+        for c in "searchable".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Search));
+        handle_key(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Normal));
+    }
+
+    #[test]
+    fn search_mode_n_cycles_and_any_key_exits() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            pane.parser.lock().unwrap().process(b"x x x\r\n");
+        }
+        app.start_search("x");
+        handle_key(&mut app, key(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Search));
+        handle_key(&mut app, key(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Normal));
+    }
+
+    #[test]
+    fn search_mode_ctrl_a_goes_to_leader() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            pane.parser.lock().unwrap().process(b"needle\r\n");
+        }
+        app.start_search("needle");
+        assert!(matches!(app.mode, InputMode::Search));
+        assert!(app.active_project().unwrap().panes[0].search.is_some());
+
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(matches!(app.mode, InputMode::Leader));
+        assert!(
+            app.active_project().unwrap().panes[0].search.is_none(),
+            "Ctrl+A must clear the pane's search state, not orphan it"
+        );
+    }
+
+    #[test]
+    fn sidebar_ctrl_c_does_not_trigger_ai_commit() {
+        let mut app = app_with_one_project();
+        app.enter_sidebar();
+        // Ctrl+C must not hit the plain 'c' binding — git add -A is a
+        // destructive side effect for a key users hit reflexively.
+        handle_key(&mut app, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.ai_in_flight);
+        assert!(app.status_msg.is_none(), "no ai-commit path should have run");
+        assert!(matches!(app.mode, InputMode::Sidebar), "mode unchanged");
     }
 }

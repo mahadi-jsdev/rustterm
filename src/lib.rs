@@ -1,5 +1,9 @@
 pub mod agents;
+pub mod ai_commit;
 pub mod completion;
+pub mod git;
+pub mod search;
+pub mod finder;
 pub mod layout;
 pub mod notify;
 pub mod palette;

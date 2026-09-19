@@ -8,9 +8,12 @@ use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::channel::<PaneEvent>();
+    // AppEvent channel — drained in the run loop: git-status polls and
+    // AI-commit worker results arrive here.
+    let (app_tx, app_rx) = mpsc::channel::<rustterm::app::AppEvent>();
 
     let roots = project_roots_from_args();
-    let mut app = App::new(events_tx.clone());
+    let mut app = App::new(events_tx.clone(), app_tx.clone());
     for root in &roots {
         let name = root
             .file_name()
@@ -36,7 +39,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut terminal = ratatui::init();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
-    let result = run(&mut terminal, &mut app, &events_rx);
+    let result = run(&mut terminal, &mut app, &events_rx, &app_rx);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
@@ -60,6 +63,7 @@ fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     events_rx: &mpsc::Receiver<PaneEvent>,
+    app_rx: &mpsc::Receiver<rustterm::app::AppEvent>,
 ) -> anyhow::Result<()> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -86,10 +90,58 @@ fn run(
                 for project in app.projects.iter_mut() {
                     for pane in project.panes.iter_mut() {
                         if pane.id == id {
-                            pane.exited = Some("exited".to_string());
+                            pane.reap();
                             pane.waiting = false;
                             pane.running = false;
                         }
+                    }
+                }
+            }
+        }
+
+        while let Ok(event) = app_rx.try_recv() {
+            match event {
+                rustterm::app::AppEvent::GitStatus { root, status } => {
+                    app.git_poll_in_flight = false;
+                    if app.active_root().as_ref() == Some(&root) {
+                        app.git_status = status;
+                    }
+                }
+                rustterm::app::AppEvent::AiMessage { root, result } => {
+                    app.ai_in_flight = false;
+                    match result {
+                        Ok(msg) => {
+                            // A prompt is already open (AddProject / RenamePane /
+                            // Search) — don't clobber its buffer. The user can
+                            // re-run ai-commit once it's closed.
+                            if app.line_input.is_some() {
+                                app.flash("ai commit ready — re-run after current prompt");
+                            } else {
+                                if let Some(project) = app.active_project_mut() {
+                                    if let Some(pane) = project.active_pane_mut() {
+                                        pane.search = None; // clear orphaned search state
+                                    }
+                                }
+                                if matches!(
+                                    app.mode,
+                                    rustterm::app::InputMode::Search
+                                        | rustterm::app::InputMode::Finder
+                                        | rustterm::app::InputMode::Sidebar
+                                ) {
+                                    app.finder = None;
+                                    app.mode = rustterm::app::InputMode::Normal;
+                                }
+                                // The commit targets the polled root — the user
+                                // may have switched projects mid-request.
+                                app.commit_root = Some(root);
+                                app.line_input =
+                                    Some(rustterm::text_input::LineEdit::from_str(&msg));
+                                app.mode = rustterm::app::InputMode::LineInput(
+                                    rustterm::app::LinePurpose::CommitMsg,
+                                );
+                            }
+                        }
+                        Err(e) => app.flash(format!("ai commit: {e}")),
                     }
                 }
             }
@@ -101,7 +153,7 @@ fn run(
             let mut pending = Vec::new();
             for project in app.projects.iter_mut() {
                 for pane in project.panes.iter_mut() {
-                    if pane.exited.is_some() {
+                    if pane.is_dead() {
                         continue;
                     }
                     let text = match pane.parser.lock() {
@@ -116,6 +168,20 @@ fn run(
             }
             for (id, e) in pending {
                 rustterm::notify::dispatch(app, id, e);
+            }
+        }
+
+        // 1s git-status poll — one worker in flight at a time; the result
+        // arrives on app_rx and is applied only if the root still matches.
+        if app.last_git_poll.elapsed() >= Duration::from_secs(1) && !app.git_poll_in_flight {
+            app.last_git_poll = Instant::now();
+            if let Some(root) = app.active_root() {
+                app.git_poll_in_flight = true;
+                let tx = app.app_tx.clone();
+                std::thread::spawn(move || {
+                    let status = rustterm::git::status(&root);
+                    let _ = tx.send(rustterm::app::AppEvent::GitStatus { root, status });
+                });
             }
         }
 

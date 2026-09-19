@@ -115,7 +115,8 @@ mod tests {
 
     fn app_with_pane() -> (App, PaneId) {
         let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(tx);
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
         let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
         let (ptx, _prx) = mpsc::channel();
         let pane = Pane::spawn(7, "pane-7".into(), 24, 80, None, ptx, None).unwrap();

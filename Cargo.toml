@@ -12,3 +12,6 @@ tui-term = { version = "0.3", features = ["vt100"] }
 anyhow = "1"
 regex = "1"
 notify-rust = "4"
+ignore = "0.4"
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
