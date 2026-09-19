@@ -4,11 +4,15 @@ const GUTTER: u16 = 1;
 
 /// (sidebar, pane-grid, status-bar) regions of a frame. Rendering and
 /// mouse hit-testing share this so they always agree on pane positions.
-pub fn frame_areas(area: Rect) -> (Rect, Rect, Rect) {
+/// `sidebar_visible: false` collapses the sidebar — panes get the width.
+pub fn frame_areas(area: Rect, sidebar_visible: bool) -> (Rect, Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(area);
+    if !sidebar_visible {
+        return (Rect::default(), rows[0], rows[1]);
+    }
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(24), Constraint::Min(0)])
@@ -156,6 +160,18 @@ mod tests {
         assert_eq!(rects[0].y, rects[1].y);
         assert_eq!(rects[2].y, rects[3].y);
         assert!(rects[2].y > rects[0].y);
+    }
+
+    #[test]
+    fn hidden_sidebar_gives_main_the_full_width() {
+        let a = area();
+        let (sb, main, _status) = frame_areas(a, false);
+        assert_eq!(sb.width, 0);
+        assert_eq!(main.width, a.width);
+        // Visible sidebar reserves 24 cols as before.
+        let (sb2, main2, _) = frame_areas(a, true);
+        assert_eq!(sb2.width, 24);
+        assert_eq!(main2.width, a.width - 24);
     }
 
     #[test]

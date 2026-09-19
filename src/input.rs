@@ -17,10 +17,11 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
         MouseEventKind::ScrollDown => false,
         _ => return,
     };
+    let sidebar_visible = app.sidebar_visible;
     let Some(project) = app.active_project_mut() else {
         return;
     };
-    let (_, main, _) = crate::layout::frame_areas(frame_area);
+    let (_, main, _) = crate::layout::frame_areas(frame_area, sidebar_visible);
     let rects = crate::layout::pane_rects(main, project.panes.len(), project.col_split, project.row_split);
     let pos = Position::new(mouse.column, mouse.row);
     let Some((pane, rect)) = project
@@ -115,6 +116,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     app.line_input = Some(edit);
                     app.mode = InputMode::LineInput(LinePurpose::AddProject);
                 }
+                KeyCode::Char('b') => app.toggle_sidebar(),
                 KeyCode::Char('g') => app.enter_sidebar(),
                 KeyCode::Char('G') => app.spawn_pane(Some("lazygit")),
                 KeyCode::Char('f') => app.open_finder(),
@@ -447,6 +449,32 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(app.mode, InputMode::Normal));
         assert_eq!(app.active_project().unwrap().panes.len(), 1);
+    }
+
+    #[test]
+    fn leader_b_toggles_sidebar_visibility() {
+        let mut app = app_with_one_project();
+        assert!(app.sidebar_visible);
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert!(!app.sidebar_visible);
+        assert!(matches!(app.mode, InputMode::Normal)); // leader consumed
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert!(app.sidebar_visible);
+    }
+
+    #[test]
+    fn hiding_while_focused_in_sidebar_returns_to_normal() {
+        let mut app = app_with_one_project();
+        app.enter_sidebar();
+        assert!(matches!(app.mode, InputMode::Sidebar));
+        app.toggle_sidebar();
+        assert!(!app.sidebar_visible);
+        assert!(matches!(app.mode, InputMode::Normal));
+        // leader g un-hides it again
+        app.toggle_sidebar();
+        assert!(app.sidebar_visible);
     }
 
     #[test]

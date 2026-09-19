@@ -10,9 +10,11 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    let (sidebar_area, main_area, status_area) = frame_areas(area);
+    let (sidebar_area, main_area, status_area) = frame_areas(area, app.sidebar_visible);
 
-    draw_sidebar(frame, app, sidebar_area);
+    if app.sidebar_visible {
+        draw_sidebar(frame, app, sidebar_area);
+    }
     draw_panes(frame, app, main_area);
     draw_status_bar(frame, app, status_area);
 
@@ -224,7 +226,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 format!("Ctrl+A for commands{state}")
             }
             InputMode::Leader => {
-                "n new  x close  h/l switch  [ ] project  +/- split  :/p palette  c add-project  g git  G lazygit  f find  / search  q quit"
+                "n new  x close  h/l switch  [ ] project  +/- split  :/p palette  c add-project  b sidebar  g git  G lazygit  f find  / search  q quit"
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),

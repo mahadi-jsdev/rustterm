@@ -61,6 +61,8 @@ pub struct App {
     /// One AI-commit worker at a time — set before spawn, cleared when
     /// the AppEvent::AiMessage result is drained.
     pub ai_in_flight: bool,
+    /// Leader `b` toggles the sidebar; hidden = panes take the width.
+    pub sidebar_visible: bool,
 }
 
 pub struct ClosedPane {
@@ -96,6 +98,7 @@ impl App {
             last_git_poll: Instant::now(),
             finder: None,
             commit_root: None,
+            sidebar_visible: true,
             ai_in_flight: false,
         }
     }
@@ -298,6 +301,7 @@ impl App {
     }
 
     pub fn enter_sidebar(&mut self) {
+        self.sidebar_visible = true; // focusing un-hides the panel
         if let Some(root) = self.active_root() {
             self.git_status = crate::git::status(&root); // instant refresh
             self.sidebar_branch_list = crate::git::branches(&root);
@@ -305,6 +309,15 @@ impl App {
         self.sidebar_sel = 0;
         self.sidebar_branches = false;
         self.mode = InputMode::Sidebar;
+    }
+
+    /// Leader `b` — hide/show the whole sidebar. Hiding while focused
+    /// inside it returns focus to the panes.
+    pub fn toggle_sidebar(&mut self) {
+        self.sidebar_visible = !self.sidebar_visible;
+        if !self.sidebar_visible && matches!(self.mode, InputMode::Sidebar) {
+            self.mode = InputMode::Normal;
+        }
     }
 
     /// Toggle file↔branch list; refreshes the cached branch list.
