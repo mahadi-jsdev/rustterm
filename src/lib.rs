@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod ai_commit;
 pub mod completion;
+pub mod daemon;
 pub mod git;
 pub mod search;
 pub mod finder;
@@ -10,6 +11,7 @@ pub mod palette;
 pub mod pane;
 pub mod pty;
 pub mod project;
+pub mod runloop;
 pub mod session;
 pub mod app;
 pub mod keys;

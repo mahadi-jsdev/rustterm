@@ -121,6 +121,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Char('g') => app.enter_sidebar(),
                 KeyCode::Char('G') => app.spawn_pane(Some("lazygit")),
                 KeyCode::Char('H') => app.hide_active_pane(),
+                KeyCode::Char('d') => {
+                    // A keeper's own socket is always alive — only refuse
+                    // when a FOREIGN keeper holds it.
+                    if !app.is_keeper && crate::daemon::keeper_alive_at(&crate::daemon::socket_path()) {
+                        app.flash("a detached session already exists");
+                    } else {
+                        app.detach_requested = true;
+                    }
+                }
                 KeyCode::Char('f') => app.open_finder(),
                 KeyCode::Char('/') => {
                     app.line_input = Some(LineEdit::new());
@@ -393,6 +402,21 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(app.should_quit);
         assert!(matches!(app.mode, InputMode::Normal), "mode should revert after a leader command");
+    }
+
+    #[test]
+    fn leader_then_d_requests_detach() {
+        let mut app = app_with_one_project();
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(app.detach_requested);
+        // The keeper itself is exempt from the live-socket refusal —
+        // re-detach from an attached session must always work.
+        let mut app = app_with_one_project();
+        app.is_keeper = true;
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(app.detach_requested);
     }
 
     #[test]

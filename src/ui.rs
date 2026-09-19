@@ -242,7 +242,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 format!("Ctrl+A for commands{state}{bg}")
             }
             InputMode::Leader => {
-                "n new  x close  h/l switch  H hide  [ ] project  +/- split  :/p palette  c add-project  b sidebar  g git  G lazygit  f find  / search  q quit"
+                "n new  x close  h/l switch  H hide  [ ] project  +/- split  :/p palette  c add-project  b sidebar  g git  G lazygit  f find  / search  d detach  q quit"
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),

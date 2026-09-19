@@ -68,12 +68,16 @@ pub fn capture(app: &App) -> Session {
     }
 }
 
-pub fn session_path() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("rustterm").join("session.json")
+    base.join("rustterm")
+}
+
+pub fn session_path() -> PathBuf {
+    data_dir().join("session.json")
 }
 
 pub fn save(app: &App) -> std::io::Result<()> {

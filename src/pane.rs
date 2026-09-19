@@ -56,29 +56,7 @@ impl Pane {
         let spawned = crate::pty::spawn(rows, cols, cwd)?;
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 10_000)));
 
-        let mut reader = spawned.reader;
-        let reader_parser = Arc::clone(&parser);
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => {
-                        let _ = events_tx.send(PaneEvent::Exited(id));
-                        break;
-                    }
-                    Ok(n) => {
-                        reader_parser.lock().unwrap().process(&buf[..n]);
-                        if events_tx.send(PaneEvent::Output(id)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        let _ = events_tx.send(PaneEvent::Exited(id));
-                        break;
-                    }
-                }
-            }
-        });
+        spawn_reader(spawned.reader, id, Arc::clone(&parser), events_tx);
 
         let pane = Pane {
             id,
@@ -179,6 +157,15 @@ impl Pane {
         Ok(())
     }
 
+    /// Post-fork: the reader thread didn't survive `fork()`, but the PTY
+    /// master did — clone a fresh Read handle and start a new reader so
+    /// the keeper keeps feeding this parser.
+    pub fn respawn_reader(&mut self, events_tx: mpsc::Sender<PaneEvent>) {
+        if let Ok(reader) = self.master.try_clone_reader() {
+            spawn_reader(reader, self.id, Arc::clone(&self.parser), events_tx);
+        }
+    }
+
     /// Best-effort: a failed kill() must NOT skip wait() — the early `?`
     /// used to leave the child unreaped (zombie) on error.
     pub fn kill(&mut self) -> anyhow::Result<()> {
@@ -200,6 +187,38 @@ impl Pane {
     pub fn is_dead(&self) -> bool {
         !matches!(self.status, PaneStatus::Running)
     }
+}
+
+/// The PTY reader loop — shared by `Pane::spawn` and the post-fork
+/// `respawn_reader`. Reads until EOF/error, feeds the parser, reports
+/// events; `Exited` is sent once on loop end.
+fn spawn_reader(
+    mut reader: Box<dyn Read + Send>,
+    id: PaneId,
+    parser: Arc<Mutex<vt100::Parser>>,
+    events_tx: mpsc::Sender<PaneEvent>,
+) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    let _ = events_tx.send(PaneEvent::Exited(id));
+                    break;
+                }
+                Ok(n) => {
+                    parser.lock().unwrap().process(&buf[..n]);
+                    if events_tx.send(PaneEvent::Output(id)).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    let _ = events_tx.send(PaneEvent::Exited(id));
+                    break;
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]

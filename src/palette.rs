@@ -20,6 +20,7 @@ pub enum CmdId {
     ReopenPane,
     RunAgent(&'static str),
     RenamePane,
+    Detach,
     Quit,
 }
 
@@ -81,6 +82,7 @@ impl Palette {
             });
         }
         items.push(Command { id: CmdId::RenamePane, label: "Rename pane…".into() });
+        items.push(Command { id: CmdId::Detach, label: "Detach session (rustterm -a to reattach)".into() });
         items.push(Command { id: CmdId::Quit, label: "Quit".into() });
         Palette { query: String::new(), selected: 0, items }
     }
@@ -200,6 +202,13 @@ pub fn execute(app: &mut App, id: &CmdId) {
                 .unwrap_or_default();
             app.mode = InputMode::LineInput(LinePurpose::RenamePane);
             app.line_input = Some(LineEdit::from_str(&current));
+        }
+        CmdId::Detach => {
+            if !app.is_keeper && crate::daemon::keeper_alive_at(&crate::daemon::socket_path()) {
+                app.flash("a detached session already exists");
+            } else {
+                app.detach_requested = true;
+            }
         }
         CmdId::Quit => app.should_quit = true,
     }

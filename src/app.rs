@@ -63,6 +63,12 @@ pub struct App {
     pub ai_in_flight: bool,
     /// Leader `b` toggles the sidebar; hidden = panes take the width.
     pub sidebar_visible: bool,
+    /// Leader `d` — the run loop breaks and main forks a keeper daemon.
+    pub detach_requested: bool,
+    /// Set in `daemonize` — this process IS the keeper, so `leader d`
+    /// must not refuse on "a detached session already exists" (the
+    /// socket is ours).
+    pub is_keeper: bool,
 }
 
 pub struct ClosedPane {
@@ -100,6 +106,8 @@ impl App {
             commit_root: None,
             sidebar_visible: true,
             ai_in_flight: false,
+            detach_requested: false,
+            is_keeper: false,
         }
     }
 
@@ -238,6 +246,21 @@ impl App {
                 Err(e) => self.flash(format!("spawn failed: {e}")),
             }
         }
+    }
+
+    /// Post-fork keeper setup: reader threads died at fork, so each
+    /// pane respawns one off its surviving `master`. In-flight git/AI
+    /// workers are gone too — clear the flags so polls refire.
+    pub fn daemonize(&mut self) {
+        for project in &mut self.projects {
+            for pane in &mut project.panes {
+                pane.respawn_reader(self.events_tx.clone());
+            }
+        }
+        self.git_poll_in_flight = false;
+        self.ai_in_flight = false;
+        self.detach_requested = false;
+        self.is_keeper = true;
     }
 
     /// Rebuild projects/panes from a saved session. Dead roots are
