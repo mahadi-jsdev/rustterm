@@ -105,7 +105,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Char(']') => app.next_project(),
                 KeyCode::Char('+') => app.adjust_split(0.05),
                 KeyCode::Char('-') => app.adjust_split(-0.05),
-                KeyCode::Char(':') => {
+                KeyCode::Char(':') | KeyCode::Char('p') => {
                     app.palette = Some(Palette::open(app));
                     app.mode = InputMode::Palette;
                 }
@@ -447,6 +447,15 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(app.mode, InputMode::Normal));
         assert_eq!(app.active_project().unwrap().panes.len(), 1);
+    }
+
+    #[test]
+    fn leader_p_opens_palette() {
+        let mut app = app_with_one_project();
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Palette));
+        assert!(app.palette.is_some());
     }
 
     #[test]
