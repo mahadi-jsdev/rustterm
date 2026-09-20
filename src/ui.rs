@@ -10,7 +10,8 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    let (sidebar_area, main_area, status_area) = frame_areas(area, app.sidebar_visible);
+    let (sidebar_area, main_area, status_area) =
+        frame_areas(area, app.sidebar_visible, app.config.sidebar_width);
 
     if app.sidebar_visible {
         draw_sidebar(frame, app, sidebar_area);
@@ -22,6 +23,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ..area
     };
     draw_floats(frame, app, overlay);
+    draw_copy_overlay(frame, app, main_area, overlay);
     draw_status_bar(frame, app, status_area);
 
     if matches!(app.mode, InputMode::Palette) {
@@ -53,7 +55,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             };
             if i == app.active_project {
                 let style = Style::default()
-                    .fg(Color::Cyan)
+                    .fg(app.config.accent)
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED);
                 ListItem::new(format!("▸ {}{}", project.name, badge)).style(style)
             } else {
@@ -69,7 +71,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_git_section(frame: &mut Frame, app: &App, area: Rect) {
     let focused = matches!(app.mode, InputMode::Sidebar);
     let border = if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(app.config.accent)
     } else {
         Style::default()
     };
@@ -92,7 +94,12 @@ fn draw_git_section(frame: &mut Frame, app: &App, area: Rect) {
                 .files
                 .iter()
                 .enumerate()
-                .map(|(i, f)| sidebar_row(format!("{} {}", f.status, f.path), i, app.sidebar_sel, focused))
+                .map(|(i, f)| {
+                    // Staged rows show the letter green, unstaged dim —
+                    // space toggles between the two states.
+                    let mark = if f.staged_only() { "+" } else { " " };
+                    sidebar_row(format!("{}{} {}", mark, f.status, f.path), i, app.sidebar_sel, focused)
+                })
                 .collect(),
             None => vec![ListItem::new("  no repo")],
         }
@@ -113,12 +120,10 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
     let Some(project) = app.active_project() else {
         return;
     };
-    let visible: Vec<(usize, &crate::pane::Pane)> = project
-        .panes
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| !p.hidden)
-        .collect();
+    let render = project.render_indices();
+    let zoomed = project.zoomed.is_some() && render.len() == 1;
+    let visible: Vec<(usize, &crate::pane::Pane)> =
+        render.iter().map(|&i| (i, &project.panes[i])).collect();
     let rects = pane_rects(area, visible.len(), project.col_split, project.row_split);
     for ((index, pane), rect) in visible.iter().zip(rects.iter()) {
         let index = *index;
@@ -130,6 +135,9 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
         }
         if pane.attention {
             title.push_str(" !");
+        }
+        if zoomed {
+            title.push_str(" [Z]");
         }
         match &pane.status {
             crate::pane::PaneStatus::Exited(code) => {
@@ -148,7 +156,7 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
         let border_style = if pane.waiting {
             Style::default().fg(Color::Yellow)
         } else if is_active {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(app.config.accent)
         } else if let Some(c) = pane.color {
             Style::default().fg(c)
         } else {
@@ -214,11 +222,11 @@ fn draw_floats(frame: &mut Frame, app: &App, area: Rect) {
     };
     let last = project.floats.len().saturating_sub(1);
     for (depth, pane) in project.floats.iter().enumerate() {
-        let rect = crate::layout::float_rect(area, depth);
+        let rect = crate::layout::float_rect(area, depth, app.config.float_pct);
         frame.render_widget(Clear, rect);
         let is_top = depth == last;
         let border_style = if is_top {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(app.config.accent)
         } else {
             Style::default()
         };
@@ -232,6 +240,67 @@ fn draw_floats(frame: &mut Frame, app: &App, area: Rect) {
         let screen = parser.screen();
         let widget = PseudoTerminal::new(screen).block(block).cursor(cursor);
         frame.render_widget(widget, rect);
+    }
+}
+
+/// Copy-mode overlay: REVERSED selection cells + a cyan cursor cell.
+/// Locates the copy pane's rendered rect — a grid pane (respecting
+/// zoom) or the top float — then maps absolute grid coords through the
+/// pane's current scroll offset.
+fn draw_copy_overlay(frame: &mut Frame, app: &App, main_area: Rect, overlay: Rect) {
+    let Some(copy) = &app.copy else { return };
+    let Some(project) = app.active_project() else { return };
+    let rect = if project.top_float().map(|f| f.id) == Some(copy.pane_id) {
+        crate::layout::float_rect(overlay, project.floats.len() - 1, app.config.float_pct)
+    } else {
+        let render = project.render_indices();
+        let Some(vi) = render.iter().position(|&i| project.panes[i].id == copy.pane_id) else {
+            return;
+        };
+        let rects = pane_rects(main_area, render.len(), project.col_split, project.row_split);
+        rects[vi]
+    };
+    // Grid panes always draw LEFT+TOP (only RIGHT/BOTTOM are shared), so
+    // content starts one cell in from the rect origin either way.
+    let Some(pane) = app.pane_by_id(copy.pane_id) else { return };
+    let (view_top, h) = match pane.parser.lock() {
+        Ok(mut p) => {
+            let s = p.screen_mut();
+            (crate::search::scrollback_len(s) - s.scrollback(), s.size().0 as usize)
+        }
+        Err(_) => return,
+    };
+    let to_xy = |(r, c): (usize, usize)| -> Option<(u16, u16)> {
+        if r < view_top || r >= view_top + h {
+            return None;
+        }
+        let x = rect.x + 1 + c as u16;
+        let y = rect.y + 1 + (r - view_top) as u16;
+        if x < rect.x + rect.width - 1 && y < rect.y + rect.height - 1 {
+            Some((x, y))
+        } else {
+            None
+        }
+    };
+    if let Some(anchor) = copy.anchor {
+        let (a, b) = if anchor <= copy.cursor { (anchor, copy.cursor) } else { (copy.cursor, anchor) };
+        let inner_w = rect.width.saturating_sub(2) as usize;
+        for r in a.0..=b.0 {
+            let c0 = if r == a.0 { a.1 } else { 0 };
+            // Middle rows select to the pane's right edge — never past
+            // it (a usize::MAX bound would iterate billions of cells).
+            let c1 = if r == b.0 { b.1.min(inner_w) } else { inner_w };
+            for c in c0..=c1 {
+                if let Some((x, y)) = to_xy((r, c)) {
+                    frame.buffer_mut()[(x, y)].modifier |= Modifier::REVERSED;
+                }
+            }
+        }
+    }
+    if let Some((x, y)) = to_xy(copy.cursor) {
+        let cell = &mut frame.buffer_mut()[(x, y)];
+        cell.set_bg(app.config.accent);
+        cell.set_fg(Color::Black);
     }
 }
 
@@ -287,17 +356,23 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     String::new()
                 };
-                format!("Ctrl+A for commands{state}{bg}{fl}")
+                format!(
+                    "Ctrl+{} for commands{state}{bg}{fl}",
+                    app.config.leader_char.to_ascii_uppercase()
+                )
             }
             InputMode::Leader => {
-                "n new  x close  h/l switch  H hide  [ ] project  +/- split  :/p palette  c add-project  b sidebar  g git  G lazygit  f find  / search  d detach  q quit"
+                "n new  x close  h/l switch  z zoom  . flag  H hide  [ ] project  +/- split  :/p palette  c add  b side  g git  G lazygit  L log  f find  / search  d detach  q quit"
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),
             InputMode::Sidebar => {
-                "j/k move  enter open  b branches  c ai-commit  esc back".to_string()
+                "j/k move  enter open  space stage  b branches  c ai-commit  esc back".to_string()
             }
             InputMode::Finder => "type to filter  ↑/↓ move  enter open  esc cancel".to_string(),
+            InputMode::Copy => {
+                "hjkl move  v select  y copy  PgUp/PgDn page  g/G ends  esc cancel".to_string()
+            }
             InputMode::Search => "n next  N prev  any key to exit".to_string(),
             InputMode::LineInput(purpose) => {
                 let label = match purpose {
@@ -550,7 +625,7 @@ mod tests {
         let mut app = App::new(tx, atx);
         let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
         let (pane_tx, _pane_rx) = mpsc::channel();
-        let pane = Pane::spawn(1, "my-pane-title".into(), 24, 80, None, pane_tx, None).unwrap();
+        let pane = Pane::spawn(1, "my-pane-title".into(), 24, 80, None, pane_tx, None, 10_000).unwrap();
         project.panes.push(pane);
         app.projects.push(project);
 
@@ -577,7 +652,7 @@ mod tests {
         let mut app = App::new(tx, atx);
         let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
         let (ptx, _prx) = mpsc::channel();
-        let mut pane = Pane::spawn(1, "work".into(), 24, 80, None, ptx, None).unwrap();
+        let mut pane = Pane::spawn(1, "work".into(), 24, 80, None, ptx, None, 10_000).unwrap();
         pane.waiting = true;
         project.panes.push(pane);
         app.projects.push(project);
@@ -674,7 +749,7 @@ mod tests {
         app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.git_status = Some(crate::git::GitStatus {
             branch: "main".into(),
-            files: vec![crate::git::ChangedFile { status: 'M', path: "src/app.rs".into() }],
+            files: vec![crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "src/app.rs".into() }],
         });
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -705,7 +780,7 @@ mod tests {
         let mut app = App::new(tx, atx);
         let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
         let (ptx, _prx) = mpsc::channel();
-        let mut pane = Pane::spawn(1, "work".into(), 24, 80, None, ptx, None).unwrap();
+        let mut pane = Pane::spawn(1, "work".into(), 24, 80, None, ptx, None, 10_000).unwrap();
         pane.status = crate::pane::PaneStatus::Exited(3);
         project.panes.push(pane);
         app.projects.push(project);

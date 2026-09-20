@@ -27,6 +27,14 @@ fn main() -> anyhow::Result<()> {
 
     let mut roots = explicit_roots_from_args();
     let mut app = App::new(events_tx.clone(), app_tx.clone());
+    // ~/.config/rustterm/config.toml — loaded before any pane spawns
+    // (scrollback size) and before session restore. A parse error falls
+    // back to defaults and surfaces as a startup flash.
+    let (config, config_err) = rustterm::config::load();
+    app.config = config;
+    if let Some(e) = config_err {
+        app.flash(e);
+    }
     // Bare `rustterm` (no args at all) restores the saved session; explicit
     // args always win — including the all-invalid-args → cwd fallback.
     if std::env::args().len() == 1 {
@@ -56,6 +64,7 @@ fn main() -> anyhow::Result<()> {
             Some(first),
             events_tx,
             None,
+            app.config.scrollback,
         )?;
         app.projects[0].panes.push(first_pane);
     }

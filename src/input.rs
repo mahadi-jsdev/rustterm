@@ -6,8 +6,6 @@ use crate::text_input::{EditResult, LineEdit};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-const SCROLL_LINES: usize = 3;
-
 /// Route a mouse event. Wheel events scroll the scrollback of the pane
 /// under the cursor — unless that pane's app enabled mouse reporting,
 /// in which case they're forwarded to the PTY in its requested encoding.
@@ -23,6 +21,10 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
 
 fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
     let sidebar_visible = app.sidebar_visible;
+    // Hoisted before the project borrow — NLL rejects self reads inside it.
+    let scroll = app.config.scroll_lines;
+    let float_pct = app.config.float_pct;
+    let sidebar_width = app.config.sidebar_width;
     let Some(project) = app.active_project_mut() else {
         return;
     };
@@ -34,7 +36,7 @@ fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
             height: frame_area.height.saturating_sub(1),
             ..frame_area
         };
-        let rect = crate::layout::float_rect(overlay, project.floats.len() - 1);
+        let rect = crate::layout::float_rect(overlay, project.floats.len() - 1, float_pct);
         if !rect.contains(pos) {
             return;
         }
@@ -49,15 +51,15 @@ fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
                 let _ = float.write_input(&wheel_bytes(up, x, y, float.mouse_sgr_encoding()));
             }
         } else if up {
-            float.scroll_up(SCROLL_LINES);
+            float.scroll_up(scroll);
         } else {
-            float.scroll_down(SCROLL_LINES);
+            float.scroll_down(scroll);
         }
         return;
     }
-    let (_, main, _) = crate::layout::frame_areas(frame_area, sidebar_visible);
-    let visible: Vec<&crate::pane::Pane> =
-        project.panes.iter().filter(|p| !p.hidden).collect();
+    let (_, main, _) = crate::layout::frame_areas(frame_area, sidebar_visible, sidebar_width);
+    let render = project.render_indices();
+    let visible: Vec<&crate::pane::Pane> = render.iter().map(|&i| &project.panes[i]).collect();
     let rects = crate::layout::pane_rects(main, visible.len(), project.col_split, project.row_split);
     let Some((pane, rect)) = visible
         .iter()
@@ -83,9 +85,9 @@ fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
             let _ = pane.write_input(&wheel_bytes(up, x, y, pane.mouse_sgr_encoding()));
         }
     } else if up {
-        pane.scroll_up(SCROLL_LINES);
+        pane.scroll_up(scroll);
     } else {
-        pane.scroll_down(SCROLL_LINES);
+        pane.scroll_down(scroll);
     }
 }
 
@@ -108,7 +110,8 @@ fn click(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
         return;
     }
     let pos = Position::new(mouse.column, mouse.row);
-    let (sidebar, main, _) = crate::layout::frame_areas(frame_area, app.sidebar_visible);
+    let (sidebar, main, _) =
+        crate::layout::frame_areas(frame_area, app.sidebar_visible, app.config.sidebar_width);
     if app.sidebar_visible && sidebar.contains(pos) {
         click_sidebar(app, pos, sidebar);
         return;
@@ -119,17 +122,12 @@ fn click(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     let Some(project) = app.active_project_mut() else {
         return;
     };
-    let visible: Vec<usize> = project
-        .panes
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| !p.hidden)
-        .map(|(i, _)| i)
-        .collect();
+    let visible: Vec<usize> = project.render_indices();
     let rects =
         crate::layout::pane_rects(main, visible.len(), project.col_split, project.row_split);
     if let Some((vi, _)) = rects.iter().enumerate().find(|(_, r)| r.contains(pos)) {
         project.active_pane = visible[vi];
+        project.zoom_follow(); // a zoomed view tracks the clicked pane
     }
     app.mode = InputMode::Normal;
 }
@@ -187,7 +185,7 @@ fn wheel_bytes(up: bool, x: u16, y: u16, sgr: bool) -> Vec<u8> {
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     match app.mode {
         InputMode::Normal => {
-            if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if app.config.is_leader(&key) {
                 app.mode = InputMode::Leader;
                 return;
             }
@@ -254,7 +252,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Char('g') => app.enter_sidebar(),
                 // exec'd: `q` in lazygit exits the shell → popup auto-closes.
                 KeyCode::Char('G') => app.spawn_float("lazygit", "exec lazygit"),
+                KeyCode::Char('L') => app.open_git_log(),
                 KeyCode::Char('H') => app.hide_active_pane(),
+                KeyCode::Char('z') => {
+                    if let Some(p) = app.active_project_mut() {
+                        p.zoom_toggle();
+                    }
+                }
+                KeyCode::Char('.') => app.jump_next_flagged(),
+                // v like vim's visual mode — keyboard selection + yank.
+                KeyCode::Char('v') => app.enter_copy(),
                 KeyCode::Char('d') => {
                     // A keeper's own socket is always alive — only refuse
                     // when a FOREIGN keeper holds it.
@@ -314,9 +321,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
         InputMode::Sidebar => {
-            // Ctrl+A works from every non-text-entry mode — re-enter Leader
-            // before any sidebar-local key handling.
-            if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            // The leader works from every non-text-entry mode — re-enter
+            // Leader before any sidebar-local key handling.
+            if app.config.is_leader(&key) {
                 app.mode = InputMode::Leader;
                 return;
             }
@@ -336,6 +343,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Up => app.sidebar_move(-1),
                 KeyCode::Char('b') if key.modifiers.is_empty() => app.sidebar_toggle_branches(),
                 KeyCode::Char('c') if key.modifiers.is_empty() => app.start_ai_commit(),
+                KeyCode::Char(' ') => app.sidebar_toggle_stage(),
                 KeyCode::Enter => app.sidebar_activate(),
                 _ => {}
             }
@@ -352,10 +360,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 }
                 KeyCode::Enter => {
                     if let Some(path) = f.selected_path() {
-                        // $VISUAL → $EDITOR → nvim (spec: nvim-primary, no vi).
-                        let editor = std::env::var("VISUAL")
-                            .ok()
-                            .filter(|s| !s.is_empty())
+                        // config.editor → $VISUAL → $EDITOR → nvim.
+                        let editor = app
+                            .config
+                            .editor
+                            .clone()
+                            .or_else(|| {
+                                std::env::var("VISUAL").ok().filter(|s| !s.is_empty())
+                            })
                             .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
                             .unwrap_or_else(|| "nvim".to_string());
                         let cmd = format!(
@@ -390,9 +402,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
         InputMode::Search => {
-            // Ctrl+A exits search AND re-enters Leader — consistent with
-            // every other non-text-entry mode.
-            if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            // The leader exits search AND re-enters Leader — consistent
+            // with every other non-text-entry mode.
+            if app.config.is_leader(&key) {
                 app.exit_search();
                 app.mode = InputMode::Leader;
                 return;
@@ -401,6 +413,30 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Char('n') => app.search_next(),
                 KeyCode::Char('N') => app.search_prev(),
                 _ => app.exit_search(), // Esc, Enter, and ANY other key exits
+            }
+        }
+        InputMode::Copy => {
+            // The leader exits copy mode into Leader — consistent escape.
+            if app.config.is_leader(&key) {
+                app.copy_exit();
+                app.mode = InputMode::Leader;
+                return;
+            }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => app.copy_exit(),
+                KeyCode::Enter | KeyCode::Char('y') => app.copy_yank(),
+                KeyCode::Char('v') => app.copy_toggle_anchor(),
+                KeyCode::Char('h') | KeyCode::Left => app.copy_move(0, -1),
+                KeyCode::Char('l') | KeyCode::Right => app.copy_move(0, 1),
+                KeyCode::Char('k') | KeyCode::Up => app.copy_move(-1, 0),
+                KeyCode::Char('j') | KeyCode::Down => app.copy_move(1, 0),
+                KeyCode::PageUp => app.copy_page(true),
+                KeyCode::PageDown => app.copy_page(false),
+                KeyCode::Char('g') => app.copy_move(i64::MIN / 2, 0), // clamps to row 0
+                KeyCode::Char('G') => app.copy_move(i64::MAX / 2, 0), // to last row
+                KeyCode::Char('0') => app.copy_move(0, i64::MIN / 2),
+                KeyCode::Char('$') => app.copy_move(0, i64::MAX / 2),
+                _ => {}
             }
         }
         InputMode::LineInput(purpose) => {
@@ -525,6 +561,11 @@ mod tests {
 
     #[test]
     fn leader_then_d_requests_detach() {
+        // Isolate from any live keeper on the default socket — a real
+        // detached session would (correctly) refuse this leader d.
+        let sock = std::env::temp_dir()
+            .join(format!("rustterm-test-sock-{}", std::process::id()));
+        std::env::set_var("RUSTTERM_SOCK", &sock);
         let mut app = app_with_one_project();
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('d'), KeyModifiers::NONE));
@@ -741,10 +782,10 @@ mod tests {
         let frame = Rect::new(0, 0, 80, 24);
         // A single pane fills the main area (right of the 24-col sidebar).
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 10), frame);
-        assert_eq!(pane_scrollback(&app), SCROLL_LINES);
+        assert_eq!(pane_scrollback(&app), app.config.scroll_lines);
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 10), frame);
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 40, 10), frame);
-        assert_eq!(pane_scrollback(&app), SCROLL_LINES);
+        assert_eq!(pane_scrollback(&app), app.config.scroll_lines);
     }
 
     #[test]
@@ -785,7 +826,7 @@ mod tests {
             .unwrap()
             .screen()
             .scrollback();
-        assert_eq!(s, SCROLL_LINES);
+        assert_eq!(s, app.config.scroll_lines);
     }
 
     fn frame80() -> Rect {
@@ -1016,6 +1057,181 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('x'), KeyModifiers::NONE));
         assert_eq!(app.active_project().unwrap().panes.len(), 0);
+    }
+
+    #[test]
+    fn leader_z_zooms_follows_focus_and_unzooms() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_pane(None); // active = pane 1
+        let leader = |app: &mut App, c: char| {
+            handle_key(app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+            handle_key(app, key(KeyCode::Char(c), KeyModifiers::NONE));
+        };
+        leader(&mut app, 'z');
+        let project = app.active_project().unwrap();
+        assert_eq!(project.render_indices().len(), 1, "zoomed view renders one pane");
+
+        // Focus moves → zoom follows to the newly active pane.
+        leader(&mut app, 'h');
+        let project = app.active_project().unwrap();
+        assert_eq!(project.active_pane, 0);
+        assert_eq!(project.render_indices(), vec![0]);
+
+        leader(&mut app, 'z');
+        assert_eq!(app.active_project().unwrap().render_indices().len(), 2);
+    }
+
+    #[test]
+    fn zoom_drops_when_zoomed_pane_is_hidden_or_closed() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.active_project_mut().unwrap().zoom_toggle();
+        assert!(app.active_project().unwrap().zoomed.is_some());
+        app.close_active_pane(); // closes the zoomed (active) pane
+        assert!(app.active_project().unwrap().zoomed.is_none());
+    }
+
+    #[test]
+    fn leader_dot_jumps_to_flagged_pane_across_projects() {
+        let mut app = app_with_one_project();
+        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        // Flag pane 0 in the CURRENT project and pane 1 — jump from pane 1
+        // (active) should land on pane 0? No: flagged[0]=(0,0) < cur → wrap.
+        app.active_project_mut().unwrap().panes[0].waiting = true;
+        app.active_project_mut().unwrap().panes[1].attention = true;
+        // cur = (0,1); flagged = [(0,0),(0,1)] — find > (0,1) → none → wrap (0,0).
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('.'), KeyModifiers::NONE));
+        assert_eq!(app.active_project().unwrap().active_pane, 0);
+        // Again → wraps to (0,1).
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('.'), KeyModifiers::NONE));
+        assert_eq!(app.active_project().unwrap().active_pane, 1);
+    }
+
+    #[test]
+    fn leader_dot_surfaces_hidden_flagged_pane() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.active_project_mut().unwrap().panes[0].hidden = true;
+        app.active_project_mut().unwrap().panes[0].waiting = true;
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('.'), KeyModifiers::NONE));
+        let project = app.active_project().unwrap();
+        assert_eq!(project.active_pane, 0);
+        assert!(!project.panes[0].hidden, "jump unhides the flagged pane");
+    }
+
+    #[test]
+    fn leader_capital_l_spawns_git_log_float() {
+        let mut app = app_with_one_project();
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('L'), KeyModifiers::SHIFT));
+        let project = app.active_project().unwrap();
+        assert_eq!(project.floats.len(), 1);
+        assert_eq!(project.floats[0].title, "git log");
+        assert!(project.floats[0]
+            .startup_command
+            .as_deref()
+            .unwrap()
+            .contains("git log"));
+    }
+
+    #[test]
+    fn sidebar_space_stages_then_unstages() {
+        let root = git_repo("stage");
+        let (tx, _rx) = mpsc::channel();
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), root.clone()));
+        app.enter_sidebar(); // real git status — one modified file
+        assert_eq!(app.sidebar_items_len(), 1);
+
+        handle_key(&mut app, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        let f = &app.git_status.as_ref().unwrap().files[0];
+        assert!(f.staged_only(), "space staged the modified file");
+        let staged = std::process::Command::new("git")
+            .arg("-C").arg(&root).args(["diff", "--cached", "--name-only"]).output().unwrap();
+        assert!(String::from_utf8_lossy(&staged.stdout).contains("a.txt"));
+
+        handle_key(&mut app, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        let f = &app.git_status.as_ref().unwrap().files[0];
+        assert!(f.has_unstaged(), "second space unstaged the file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn leader_v_enters_copy_mode_and_esc_exits() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            pane.parser.lock().unwrap().process(b"hello\r\nworld\r\n");
+        }
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Copy));
+        assert!(app.copy.is_some());
+        handle_key(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Normal));
+        assert!(app.copy.is_none());
+    }
+
+    #[test]
+    fn copy_cursor_moves_and_scrolls_to_stay_visible() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            // Fill a 24-row pane with scrollback.
+            let pane = &app.active_project().unwrap().panes[0];
+            let mut p = pane.parser.lock().unwrap();
+            for i in 0..60 {
+                p.process(format!("line{i}\r\n").as_bytes());
+            }
+        }
+        app.enter_copy();
+        // Cursor starts at the pane cursor (bottom of live view). k×40
+        // walks it deep into scrollback — the viewport must follow.
+        for _ in 0..40 {
+            handle_key(&mut app, key(KeyCode::Char('k'), KeyModifiers::NONE));
+        }
+        let copy = app.copy.as_ref().unwrap();
+        let row = copy.cursor.0;
+        let pane = &app.active_project().unwrap().panes[0];
+        let (sb, offset, h) = {
+            let mut p = pane.parser.lock().unwrap();
+            let s = p.screen_mut();
+            (crate::search::scrollback_len(s), s.scrollback(), s.size().0 as usize)
+        };
+        let view_top = sb - offset;
+        assert!(row >= view_top && row < view_top + h, "cursor {row} outside view {view_top}..{}", view_top + h);
+        assert!(offset > 0, "scrolled into scrollback");
+    }
+
+    #[test]
+    fn copy_yank_clears_state_and_restores_scroll() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            let mut p = pane.parser.lock().unwrap();
+            for i in 0..30 {
+                p.process(format!("yankme{i}\r\n").as_bytes());
+            }
+        }
+        app.enter_copy();
+        handle_key(&mut app, key(KeyCode::Char('v'), KeyModifiers::NONE)); // anchor
+        handle_key(&mut app, key(KeyCode::Char('k'), KeyModifiers::NONE)); // extend up
+        handle_key(&mut app, key(KeyCode::Char('y'), KeyModifiers::NONE)); // yank → osc52 to stdout
+        assert!(app.copy.is_none());
+        assert!(matches!(app.mode, InputMode::Normal));
+        let pane = &app.active_project().unwrap().panes[0];
+        assert_eq!(pane.parser.lock().unwrap().screen().scrollback(), 0, "view restored to live");
     }
 
     #[test]

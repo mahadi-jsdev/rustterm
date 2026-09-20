@@ -32,8 +32,9 @@ impl SearchState {
 
 /// All grid rows (scrollback + visible), enumerated by stepping the
 /// viewport. Saves and restores the current scroll offset; transient
-/// mutation is invisible under the parser lock.
-fn grid_lines(screen: &mut vt100::Screen) -> Vec<String> {
+/// mutation is invisible under the parser lock. Shared by search and
+/// copy-mode extraction.
+pub(crate) fn grid_lines(screen: &mut vt100::Screen) -> Vec<String> {
     let h = screen.size().0 as usize;
     if h == 0 {
         return Vec::new();

@@ -8,7 +8,23 @@ pub struct GitStatus {
 
 pub struct ChangedFile {
     pub status: char,
+    /// Raw porcelain XY: `index` is the staged status, `worktree` the
+    /// unstaged one (' ' = clean, '?' = untracked pair).
+    pub index: char,
+    pub worktree: char,
     pub path: String,
+}
+
+impl ChangedFile {
+    /// Has unstaged work (incl. untracked) — `git add` is the next step.
+    pub fn has_unstaged(&self) -> bool {
+        self.worktree != ' '
+    }
+
+    /// Fully staged, nothing left in the worktree — unstage is next.
+    pub fn staged_only(&self) -> bool {
+        !self.has_unstaged()
+    }
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
@@ -60,6 +76,8 @@ fn parse_porcelain(raw: &[u8]) -> Vec<ChangedFile> {
         let y = entry.as_bytes()[1] as char;
         files.push(ChangedFile {
             status: display_letter(x, y),
+            index: x,
+            worktree: y,
             path: entry[3..].to_string(),
         });
         if x == 'R' || y == 'R' {
@@ -111,6 +129,21 @@ pub fn branches(root: &Path) -> Vec<String> {
 
 pub fn switch(root: &Path, branch: &str) -> Result<(), String> {
     let out = git(root, &["switch", branch])?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Sidebar space-toggle: `unstage` → `git restore --staged`, else
+/// `git add` (covers unstaged edits and untracked files alike).
+pub fn toggle_stage(root: &Path, path: &str, unstage: bool) -> Result<(), String> {
+    let out = if unstage {
+        git(root, &["restore", "--staged", "--", path])?
+    } else {
+        git(root, &["add", "--", path])?
+    };
     if out.status.success() {
         Ok(())
     } else {

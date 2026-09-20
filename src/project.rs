@@ -9,6 +9,9 @@ pub struct Project {
     /// diffs) stacked on top of the grid without reflowing it. The last
     /// float owns pane input; leader+x pops it. Never serialized.
     pub floats: Vec<Pane>,
+    /// leader+z zoom: this pane id renders full-grid. Follows focus —
+    /// switching panes re-zooms the new active one.
+    pub zoomed: Option<crate::pane::PaneId>,
     pub active_pane: usize,
     pub col_split: f32,
     pub row_split: f32,
@@ -21,6 +24,7 @@ impl Project {
             root,
             panes: Vec::new(),
             floats: Vec::new(),
+            zoomed: None,
             active_pane: 0,
             col_split: 0.5,
             row_split: 0.5,
@@ -69,6 +73,36 @@ impl Project {
         self.panes.iter().position(|p| p.hidden)
     }
 
+    /// Panes actually drawn — normally all visible ones, but while
+    /// zoomed only the zoomed pane (so the grid and mouse hit-testing
+    /// always agree on what's on screen). A zoomed pane that got
+    /// hidden/closed is dropped here.
+    pub fn render_indices(&self) -> Vec<usize> {
+        if let Some(id) = self.zoomed {
+            if let Some(i) = self.panes.iter().position(|p| p.id == id && !p.hidden) {
+                return vec![i];
+            }
+        }
+        self.visible_indices()
+    }
+
+    /// leader+z — zoom the active pane to fill the grid, or unzoom.
+    /// Focus follows: next/prev/click re-zoom the newly active pane.
+    pub fn zoom_toggle(&mut self) {
+        self.zoomed = match self.zoomed {
+            Some(_) => None,
+            None => self.active_pane().map(|p| p.id),
+        };
+    }
+
+    /// Keep zoom glued to the active pane when it's on — called after
+    /// every focus change so a switch swaps the zoomed pane.
+    pub fn zoom_follow(&mut self) {
+        if self.zoomed.is_some() {
+            self.zoomed = self.active_pane().map(|p| p.id);
+        }
+    }
+
     /// Nearest visible pane index to `from` by distance — forward wins
     /// ties. `None` when every pane is hidden.
     pub fn nearest_visible(&self, from: usize) -> Option<usize> {
@@ -90,6 +124,7 @@ impl Project {
         } else if let Some(&i) = visible.first() {
             self.active_pane = i;
         }
+        self.zoom_follow();
     }
 
     pub fn prev_pane(&mut self) {
@@ -99,6 +134,7 @@ impl Project {
         } else if let Some(&i) = visible.first() {
             self.active_pane = i;
         }
+        self.zoom_follow();
     }
 }
 
@@ -110,7 +146,7 @@ mod tests {
 
     fn dummy_pane(id: u32) -> Pane {
         let (tx, _rx) = mpsc::channel::<PaneEvent>();
-        Pane::spawn(id, format!("pane-{id}"), 24, 80, None, tx, None).unwrap()
+        Pane::spawn(id, format!("pane-{id}"), 24, 80, None, tx, None, 10_000).unwrap()
     }
 
     #[test]

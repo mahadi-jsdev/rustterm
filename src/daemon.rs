@@ -29,6 +29,13 @@ pub const REPLY_KILL: u8 = b'k';
 pub const REPLY_BUSY: u8 = b'b'; // protocol reserve — accepts serialize attach
 
 pub fn socket_path() -> PathBuf {
+    // RUSTTERM_SOCK overrides the default — parallel/ISOLATED sessions
+    // and tests get their own attach socket.
+    if let Ok(p) = std::env::var("RUSTTERM_SOCK") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
     crate::session::data_dir().join("attach.sock")
 }
 

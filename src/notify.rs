@@ -119,7 +119,7 @@ mod tests {
         let mut app = App::new(tx, atx);
         let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
         let (ptx, _prx) = mpsc::channel();
-        let pane = Pane::spawn(7, "pane-7".into(), 24, 80, None, ptx, None).unwrap();
+        let pane = Pane::spawn(7, "pane-7".into(), 24, 80, None, ptx, None, 10_000).unwrap();
         let id = pane.id;
         project.panes.push(pane);
         app.projects.push(project);

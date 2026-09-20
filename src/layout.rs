@@ -7,7 +7,11 @@ const GUTTER: u16 = 0;
 /// (sidebar, pane-grid, status-bar) regions of a frame. Rendering and
 /// mouse hit-testing share this so they always agree on pane positions.
 /// `sidebar_visible: false` collapses the sidebar — panes get the width.
-pub fn frame_areas(area: Rect, sidebar_visible: bool) -> (Rect, Rect, Rect) {
+pub fn frame_areas(
+    area: Rect,
+    sidebar_visible: bool,
+    sidebar_width: u16,
+) -> (Rect, Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -17,7 +21,10 @@ pub fn frame_areas(area: Rect, sidebar_visible: bool) -> (Rect, Rect, Rect) {
     }
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(24), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(sidebar_width.min(area.width.saturating_sub(20))),
+            Constraint::Min(0),
+        ])
         .split(rows[0]);
     (cols[0], cols[1], rows[1])
 }
@@ -99,12 +106,12 @@ pub fn pane_borders(rects: &[Rect], r: Rect) -> Borders {
     b
 }
 
-/// Floating popup pane: ~90% of `area`, centered; each deeper float in
+/// Floating popup pane: `pct`% of `area`, centered; each deeper float in
 /// the stack shifts 2 cols right / 1 row down so the pile stays visible.
 /// Clamped to `area` so a float never overflows a small terminal.
-pub fn float_rect(area: Rect, depth: usize) -> Rect {
-    let w = (area.width * 9 / 10).clamp(20.min(area.width), area.width);
-    let h = (area.height * 9 / 10).clamp(6.min(area.height), area.height);
+pub fn float_rect(area: Rect, depth: usize, pct: u16) -> Rect {
+    let w = (area.width * pct / 100).clamp(20.min(area.width), area.width);
+    let h = (area.height * pct / 100).clamp(6.min(area.height), area.height);
     // Cascade shift capped at the slack left of the centered rect so a
     // deep stack can't push the float past the right/bottom edge.
     let dx = (depth as u16 * 2).min(area.width - w - (area.width - w) / 2);
@@ -226,36 +233,46 @@ mod tests {
     #[test]
     fn hidden_sidebar_gives_main_the_full_width() {
         let a = area();
-        let (sb, main, _status) = frame_areas(a, false);
+        let (sb, main, _status) = frame_areas(a, false, 24);
         assert_eq!(sb.width, 0);
         assert_eq!(main.width, a.width);
-        // Visible sidebar reserves 24 cols as before.
-        let (sb2, main2, _) = frame_areas(a, true);
+        // Visible sidebar reserves the configured width.
+        let (sb2, main2, _) = frame_areas(a, true, 24);
         assert_eq!(sb2.width, 24);
         assert_eq!(main2.width, a.width - 24);
+        // A huge configured width can't starve the grid below 20 cols.
+        let (sb3, main3, _) = frame_areas(a, true, 500);
+        assert_eq!(main3.width, 20);
+        assert_eq!(sb3.width, a.width - 20);
     }
 
     #[test]
     fn float_rect_is_centered_cascading_and_bounded() {
         let a = area();
-        let f0 = float_rect(a, 0);
+        let f0 = float_rect(a, 0, 90);
         assert_eq!(f0.width, 90);
         assert_eq!(f0.height, 36);
         assert_eq!(f0.x, 5); // centered: (100-90)/2
         assert_eq!(f0.y, 2); // centered: (40-36)/2
         // Each deeper float shifts +2x/+1y.
-        let f1 = float_rect(a, 1);
+        let f1 = float_rect(a, 1, 90);
         assert_eq!(f1.x, f0.x + 2);
         assert_eq!(f1.y, f0.y + 1);
         // Never overflows the area even at silly depths/sizes.
         for d in [0usize, 3, 100] {
-            let r = float_rect(a, d);
+            let r = float_rect(a, d, 90);
             assert!(r.x >= a.x && r.x + r.width <= a.x + a.width);
             assert!(r.y >= a.y && r.y + r.height <= a.y + a.height);
         }
         let tiny = Rect::new(0, 0, 12, 4);
-        let r = float_rect(tiny, 0);
+        let r = float_rect(tiny, 0, 90);
         assert!(r.x + r.width <= 12 && r.y + r.height <= 4);
+        // Smaller pct → smaller centered float.
+        let f50 = float_rect(a, 0, 50);
+        assert_eq!(f50.width, 50);
+        assert_eq!(f50.height, 20);
+        assert_eq!(f50.x, 25);
+        assert_eq!(f50.y, 10);
     }
 
     #[test]

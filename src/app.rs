@@ -14,6 +14,8 @@ pub enum InputMode {
     Sidebar,
     Finder,
     Search,
+    /// leader+[ — keyboard selection over a pane's grid; y yanks via OSC52.
+    Copy,
     LineInput(LinePurpose),
 }
 
@@ -69,6 +71,12 @@ pub struct App {
     /// must not refuse on "a detached session already exists" (the
     /// socket is ours).
     pub is_keeper: bool,
+    /// Copy-mode state (leader+[). The pane is addressed by id — a
+    /// closed pane just invalidates the mode on next access.
+    pub copy: Option<crate::copy::CopyState>,
+    /// ~/.config/rustterm/config.toml — loaded in main, defaults here
+    /// so tests never read the user's real config.
+    pub config: crate::config::Config,
 }
 
 pub struct ClosedPane {
@@ -108,7 +116,24 @@ impl App {
             ai_in_flight: false,
             detach_requested: false,
             is_keeper: false,
+            copy: None,
+            config: crate::config::Config::default(),
         }
+    }
+
+    /// Pane lookup by id across every project's grid panes AND floats.
+    pub fn pane_by_id(&self, id: PaneId) -> Option<&Pane> {
+        self.projects
+            .iter()
+            .flat_map(|p| p.panes.iter().chain(p.floats.iter()))
+            .find(|p| p.id == id)
+    }
+
+    pub fn pane_by_id_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
+        self.projects
+            .iter_mut()
+            .flat_map(|p| p.panes.iter_mut().chain(p.floats.iter_mut()))
+            .find(|p| p.id == id)
     }
 
     pub fn active_project(&self) -> Option<&Project> {
@@ -213,6 +238,10 @@ impl App {
         let idx = project.active_pane;
         let title = project.panes[idx].title.clone();
         project.panes[idx].hidden = true;
+        // A hidden pane can't be the zoomed one — drop zoom with it.
+        if project.zoomed == Some(project.panes[idx].id) {
+            project.zoomed = None;
+        }
         if let Some(next) = project.nearest_visible(idx) {
             project.active_pane = next;
         }
@@ -235,10 +264,19 @@ impl App {
     pub fn spawn_pane(&mut self, startup_command: Option<&str>) {
         let id = self.alloc_pane_id();
         let events_tx = self.events_tx.clone();
+        let scrollback = self.config.scrollback;
         if let Some(project) = self.active_project_mut() {
             let cwd = project.root.clone();
-            match Pane::spawn(id, format!("pane-{id}"), 24, 80, Some(&cwd), events_tx, startup_command)
-            {
+            match Pane::spawn(
+                id,
+                format!("pane-{id}"),
+                24,
+                80,
+                Some(&cwd),
+                events_tx,
+                startup_command,
+                scrollback,
+            ) {
                 Ok(pane) => {
                     project.panes.push(pane);
                     project.active_pane = project.panes.len() - 1;
@@ -255,9 +293,19 @@ impl App {
     pub fn spawn_float(&mut self, title: &str, cmd: &str) {
         let id = self.alloc_pane_id();
         let events_tx = self.events_tx.clone();
+        let scrollback = self.config.scrollback;
         if let Some(project) = self.active_project_mut() {
             let cwd = project.root.clone();
-            match Pane::spawn(id, title.to_string(), 24, 80, Some(&cwd), events_tx, Some(cmd)) {
+            match Pane::spawn(
+                id,
+                title.to_string(),
+                24,
+                80,
+                Some(&cwd),
+                events_tx,
+                Some(cmd),
+                scrollback,
+            ) {
                 Ok(pane) => project.floats.push(pane),
                 Err(e) => self.flash(format!("spawn failed: {e}")),
             }
@@ -297,6 +345,7 @@ impl App {
     /// spawn failures drop that pane — restore never hard-fails.
     /// Processes come back as fresh shells replaying `startup_command`.
     pub fn restore_session(&mut self, s: &crate::session::Session) {
+        let scrollback = self.config.scrollback;
         for sp in &s.projects {
             if !sp.root.is_dir() {
                 continue;
@@ -315,6 +364,7 @@ impl App {
                     Some(&cwd),
                     self.events_tx.clone(),
                     pp.startup_command.as_deref(),
+                    scrollback,
                 ) {
                     Ok(mut pane) => {
                         pane.hidden = pp.hidden;
@@ -356,6 +406,9 @@ impl App {
             let idx = project.active_pane;
             let mut removed = project.panes.remove(idx);
             let _ = removed.kill();
+            if project.zoomed == Some(removed.id) {
+                project.zoomed = None;
+            }
             if project.active_pane >= project.panes.len() && project.active_pane > 0 {
                 project.active_pane -= 1;
             }
@@ -406,6 +459,7 @@ impl App {
         self.active_project = target;
         let id = self.alloc_pane_id();
         let events_tx = self.events_tx.clone();
+        let scrollback = self.config.scrollback;
         if let Some(project) = self.active_project_mut() {
             match Pane::spawn(
                 id,
@@ -415,6 +469,7 @@ impl App {
                 Some(&closed.cwd),
                 events_tx,
                 closed.startup_command.as_deref(),
+                scrollback,
             ) {
                 Ok(mut pane) => {
                     pane.color = closed.color;
@@ -519,6 +574,197 @@ impl App {
 
     pub fn sidebar_selected_branch(&self) -> Option<String> {
         self.sidebar_branch_list.get(self.sidebar_sel).cloned()
+    }
+
+    /// Sidebar space: stage a file with unstaged work, unstage a fully
+    /// staged one. Refresh the cached status so the row re-renders.
+    pub fn sidebar_toggle_stage(&mut self) {
+        if self.sidebar_branches {
+            return;
+        }
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let Some((has_unstaged, path)) = self
+            .git_status
+            .as_ref()
+            .and_then(|s| s.files.get(self.sidebar_sel))
+            .map(|f| (f.has_unstaged(), f.path.clone()))
+        else {
+            return;
+        };
+        match crate::git::toggle_stage(&root, &path, !has_unstaged) {
+            Ok(()) => {
+                self.git_status = crate::git::status(&root);
+                let verb = if has_unstaged { "staged" } else { "unstaged" };
+                self.flash(format!("{verb} {path}"));
+            }
+            Err(e) => self.flash(format!("git: {e}")),
+        }
+    }
+
+    /// leader+L — recent history in a popup; `q` in the pager auto-closes.
+    pub fn open_git_log(&mut self) {
+        self.spawn_float(
+            "git log",
+            "exec sh -c 'git log --oneline --graph --decorate --color=always -30 | less -R'",
+        );
+    }
+
+    /// leader+. — jump to the next pane flagged waiting/attention,
+    /// scanning panes in order and wrapping; crosses projects and
+    /// unhides a backgrounded pane on landing.
+    pub fn jump_next_flagged(&mut self) {
+        let n = self.projects.len();
+        if n == 0 {
+            return;
+        }
+        let cur = (self.active_project, self.active_project().map(|p| p.active_pane).unwrap_or(0));
+        // Ordered (project, pane) pairs flagged — traverse all panes in
+        // order, find the first flagged strictly after `cur`, else wrap
+        // to the first flagged overall.
+        let mut flagged: Vec<(usize, usize)> = Vec::new();
+        for (pi, project) in self.projects.iter().enumerate() {
+            for (idx, pane) in project.panes.iter().enumerate() {
+                if pane.waiting || pane.attention {
+                    flagged.push((pi, idx));
+                }
+            }
+        }
+        if flagged.is_empty() {
+            self.flash("no flagged panes");
+            return;
+        }
+        let next = flagged
+            .iter()
+            .copied()
+            .find(|&(pi, idx)| (pi, idx) > cur)
+            .unwrap_or(flagged[0]);
+        self.active_project = next.0;
+        let project = &mut self.projects[next.0];
+        project.panes[next.1].hidden = false; // surface a backgrounded flag
+        project.active_pane = next.1;
+        project.zoom_follow();
+        let title = project.panes[next.1].title.clone();
+        self.clear_git_cache();
+        self.flash(format!("→ {title}"));
+    }
+
+    /// leader+[ — enter copy mode on the top float, else the active
+    /// pane. The cursor starts on the pane's own cursor position.
+    pub fn enter_copy(&mut self) {
+        let Some(project) = self.active_project() else {
+            return;
+        };
+        let pane = project.top_float().or_else(|| project.active_pane());
+        let Some(pane) = pane else { return };
+        let (row, col) = {
+            let mut p = pane.parser.lock().unwrap();
+            let s = p.screen_mut();
+            let (cr, cc) = s.cursor_position();
+            let sb = crate::search::scrollback_len(s);
+            (sb - s.scrollback() + cr as usize, cc as usize)
+        };
+        self.copy = Some(crate::copy::CopyState {
+            pane_id: pane.id,
+            cursor: (row, col),
+            anchor: None,
+        });
+        self.mode = InputMode::Copy;
+    }
+
+    /// Move the copy cursor in absolute grid coords, clamped to the
+    /// grid's real bounds, and scroll the pane so it stays in view.
+    /// No-op when the copy pane is gone.
+    pub fn copy_move(&mut self, drow: i64, dcol: i64) {
+        // Two-step: copy the pane id first — holding &mut self.copy blocks
+        // the &self borrow pane_by_id needs.
+        let Some(pane_id) = self.copy.as_ref().map(|c| c.pane_id) else { return };
+        let Some((r, c)) = self.copy.as_ref().map(|cc| cc.cursor) else { return };
+        let Some(pane) = self.pane_by_id(pane_id) else {
+            self.copy = None;
+            self.mode = InputMode::Normal;
+            return;
+        };
+        // All pane access inside this borrow: compute the new cursor and
+        // scroll the viewport so it stays in view (top = sb - offset).
+        let new_cursor = {
+            let mut p = pane.parser.lock().unwrap();
+            let s = p.screen_mut();
+            let (h, w) = s.size();
+            let sb = crate::search::scrollback_len(s);
+            let (total, cols) = (sb + h as usize, w as usize);
+            let nr = (r as i64 + drow).clamp(0, total.saturating_sub(1) as i64) as usize;
+            let nc = (c as i64 + dcol).clamp(0, cols.saturating_sub(1) as i64) as usize;
+            let offset = s.scrollback();
+            let view_top = sb - offset;
+            let new_offset = if nr < view_top {
+                sb - nr // cursor to viewport top
+            } else if nr >= view_top + h as usize {
+                sb + h as usize - 1 - nr // cursor to viewport bottom
+            } else {
+                offset
+            };
+            if new_offset != offset {
+                s.set_scrollback(new_offset);
+            }
+            (nr, nc)
+        };
+        if let Some(copy) = self.copy.as_mut() {
+            copy.cursor = new_cursor;
+        }
+    }
+
+    /// PageUp/PageDown — one viewport height of cursor travel.
+    pub fn copy_page(&mut self, up: bool) {
+        let h = self
+            .copy
+            .as_ref()
+            .and_then(|c| self.pane_by_id(c.pane_id))
+            .and_then(|p| p.parser.lock().ok().map(|pp| pp.screen().size().0 as i64))
+            .unwrap_or(10)
+            .max(1);
+        self.copy_move(if up { -h } else { h }, 0);
+    }
+
+    /// `v` — toggle the selection anchor at the cursor.
+    pub fn copy_toggle_anchor(&mut self) {
+        if let Some(copy) = self.copy.as_mut() {
+            copy.anchor = if copy.anchor.is_some() { None } else { Some(copy.cursor) };
+        }
+    }
+
+    /// `y`/Enter — yank the selection (or the cursor line without one)
+    /// to the system clipboard via OSC52, then leave copy mode.
+    pub fn copy_yank(&mut self) {
+        let Some(copy) = self.copy.take() else { return };
+        self.mode = InputMode::Normal;
+        let Some(pane) = self.pane_by_id(copy.pane_id) else { return };
+        let text = {
+            let mut p = pane.parser.lock().unwrap();
+            let lines = crate::search::grid_lines(p.screen_mut());
+            match copy.anchor {
+                Some(a) => crate::copy::extract(&lines, a, copy.cursor),
+                None => crate::copy::extract_line(&lines, copy.cursor.0),
+            }
+        };
+        pane.scroll_to_bottom();
+        if text.is_empty() {
+            self.flash("nothing to copy");
+        } else {
+            crate::copy::yank(&text);
+            self.flash(format!("copied {} chars", text.chars().count()));
+        }
+    }
+
+    /// Esc/q — leave copy mode without yanking; view snaps back to live.
+    pub fn copy_exit(&mut self) {
+        if let Some(copy) = self.copy.take() {
+            if let Some(pane) = self.pane_by_id(copy.pane_id) {
+                pane.scroll_to_bottom();
+            }
+        }
+        self.mode = InputMode::Normal;
     }
 
     /// Activate the selected sidebar row — branches `git switch`, files
@@ -876,8 +1122,8 @@ mod tests {
         app.git_status = Some(crate::git::GitStatus {
             branch: "main".into(),
             files: vec![
-                crate::git::ChangedFile { status: 'M', path: "a".into() },
-                crate::git::ChangedFile { status: '?', path: "b".into() },
+                crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "a".into() },
+                crate::git::ChangedFile { status: '?', index: '?', worktree: '?', path: "b".into() },
             ],
         });
         assert_eq!(app.sidebar_items_len(), 2);
@@ -891,7 +1137,7 @@ mod tests {
         let mut app = app_with_one_project();
         app.git_status = Some(crate::git::GitStatus {
             branch: "m".into(),
-            files: vec![crate::git::ChangedFile { status: 'M', path: "a".into() }],
+            files: vec![crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "a".into() }],
         });
         app.sidebar_move(1);
         assert_eq!(app.sidebar_sel, 0); // wraps or clamps to len-1
@@ -904,7 +1150,7 @@ mod tests {
         let mut app = app_with_one_project();
         app.git_status = Some(crate::git::GitStatus {
             branch: "m".into(),
-            files: vec![crate::git::ChangedFile { status: 'M', path: "src/a.rs".into() }],
+            files: vec![crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "src/a.rs".into() }],
         });
         app.sidebar_sel = 0;
         app.sidebar_activate();
@@ -1000,7 +1246,7 @@ mod tests {
         let mut app = app_with_projects(&["a", "b"]);
         app.git_status = Some(crate::git::GitStatus {
             branch: "main".into(),
-            files: vec![crate::git::ChangedFile { status: 'M', path: "x".into() }],
+            files: vec![crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "x".into() }],
         });
         app.sidebar_branch_list = vec!["main".into()];
         app.set_active_project(1);

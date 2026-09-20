@@ -52,9 +52,14 @@ impl Pane {
         cwd: Option<&Path>,
         events_tx: mpsc::Sender<PaneEvent>,
         startup_command: Option<&str>,
+        scrollback: usize,
     ) -> anyhow::Result<Pane> {
+        // A 0x0 terminal (detached launch, size() failure) panics vt100
+        // (`size.rows - 1` underflows) — clamp to a minimal size.
+        let rows = rows.max(1);
+        let cols = cols.max(1);
         let spawned = crate::pty::spawn(rows, cols, cwd)?;
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 10_000)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, scrollback)));
 
         spawn_reader(spawned.reader, id, Arc::clone(&parser), events_tx);
 
@@ -248,7 +253,7 @@ mod tests {
     #[test]
     fn write_input_is_visible_in_parsed_screen() {
         let (tx, rx) = mpsc::channel();
-        let pane = Pane::spawn(1, "test".into(), 24, 80, None, tx, None).unwrap();
+        let pane = Pane::spawn(1, "test".into(), 24, 80, None, tx, None, 10_000).unwrap();
         pane.write_input(b"echo rustterm-pane-ok\n").unwrap();
         assert!(
             drain_until(&rx, &pane.parser, "rustterm-pane-ok", Duration::from_secs(3)),
@@ -259,7 +264,7 @@ mod tests {
     #[test]
     fn scroll_offsets_move_through_scrollback_and_clamp() {
         let (tx, _rx) = mpsc::channel();
-        let pane = Pane::spawn(1, "s".into(), 5, 20, None, tx, None).unwrap();
+        let pane = Pane::spawn(1, "s".into(), 5, 20, None, tx, None, 10_000).unwrap();
         {
             let mut p = pane.parser.lock().unwrap();
             for _ in 0..40 {
@@ -291,6 +296,7 @@ mod tests {
             None,
             tx,
             Some("echo rustterm-startup-ok"),
+            10_000,
         )
         .unwrap();
         assert!(
@@ -303,7 +309,7 @@ mod tests {
     #[test]
     fn kill_terminates_the_child_and_reader_reports_exit() {
         let (tx, rx) = mpsc::channel();
-        let mut pane = Pane::spawn(2, "test".into(), 24, 80, None, tx, None).unwrap();
+        let mut pane = Pane::spawn(2, "test".into(), 24, 80, None, tx, None, 10_000).unwrap();
         pane.kill().unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -321,7 +327,7 @@ mod tests {
     #[test]
     fn reap_captures_the_exit_code() {
         let (tx, rx) = mpsc::channel();
-        let mut pane = Pane::spawn(1, "s".into(), 24, 80, None, tx, None).unwrap();
+        let mut pane = Pane::spawn(1, "s".into(), 24, 80, None, tx, None, 10_000).unwrap();
         pane.write_input(b"exit 3\n").unwrap();
         // Wait for the reader thread to report PTY EOF.
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -339,7 +345,7 @@ mod tests {
     #[test]
     fn is_dead_reflects_status() {
         let (tx, _rx) = mpsc::channel();
-        let mut pane = Pane::spawn(1, "s".into(), 24, 80, None, tx, None).unwrap();
+        let mut pane = Pane::spawn(1, "s".into(), 24, 80, None, tx, None, 10_000).unwrap();
         assert!(!pane.is_dead());
         pane.status = PaneStatus::Exited(0);
         assert!(pane.is_dead());
