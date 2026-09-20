@@ -61,13 +61,16 @@ pub fn tick(
     while let Ok(event) = events_rx.try_recv() {
         if let PaneEvent::Exited(id) = event {
             for project in app.projects.iter_mut() {
-                for pane in project.panes.iter_mut() {
+                for pane in project.panes.iter_mut().chain(project.floats.iter_mut()) {
                     if pane.id == id {
                         pane.reap();
                         pane.waiting = false;
                         pane.running = false;
                     }
                 }
+                // A float whose tool exited (exec'd startup command, or
+                // `exit` in the popup shell) pops itself automatically.
+                project.floats.retain(|p| !p.is_dead());
             }
         }
     }
@@ -158,4 +161,30 @@ pub fn tick(
     }
 
     app.clear_focused_badges();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::project::Project;
+    use std::path::PathBuf;
+
+    #[test]
+    fn exited_float_pops_itself() {
+        let (tx, rx) = mpsc::channel();
+        let (atx, arx) = mpsc::channel();
+        let mut app = App::new(tx.clone(), atx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.spawn_float("nvim", "exec true");
+        assert_eq!(app.active_project().unwrap().floats.len(), 1);
+
+        // Kill the popup's child, then deliver the Exited its reader
+        // would send — tick reaps it and the float self-removes.
+        let id = app.active_project().unwrap().floats[0].id;
+        app.active_project_mut().unwrap().floats[0].kill().unwrap();
+        tx.send(PaneEvent::Exited(id)).unwrap();
+        tick(&mut app, &rx, &arx);
+        assert!(app.active_project().unwrap().floats.is_empty());
+    }
 }

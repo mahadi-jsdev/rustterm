@@ -5,6 +5,10 @@ pub struct Project {
     pub name: String,
     pub root: PathBuf,
     pub panes: Vec<Pane>,
+    /// Floating overlay panes — transient tool windows (editor, lazygit,
+    /// diffs) stacked on top of the grid without reflowing it. The last
+    /// float owns pane input; leader+x pops it. Never serialized.
+    pub floats: Vec<Pane>,
     pub active_pane: usize,
     pub col_split: f32,
     pub row_split: f32,
@@ -16,10 +20,21 @@ impl Project {
             name,
             root,
             panes: Vec::new(),
+            floats: Vec::new(),
             active_pane: 0,
             col_split: 0.5,
             row_split: 0.5,
         }
+    }
+
+    /// The top of the float stack — the modal input target while any
+    /// floats exist.
+    pub fn top_float(&self) -> Option<&Pane> {
+        self.floats.last()
+    }
+
+    pub fn top_float_mut(&mut self) -> Option<&mut Pane> {
+        self.floats.last_mut()
     }
 
     pub fn active_pane(&self) -> Option<&Pane> {

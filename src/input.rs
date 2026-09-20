@@ -26,11 +26,39 @@ fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
     let Some(project) = app.active_project_mut() else {
         return;
     };
+    let pos = Position::new(mouse.column, mouse.row);
+    // A float is modal — wheel inside it scrolls/forwards to the float,
+    // wheel outside is swallowed rather than scrolling the grid behind.
+    if let Some(float) = project.top_float() {
+        let overlay = Rect {
+            height: frame_area.height.saturating_sub(1),
+            ..frame_area
+        };
+        let rect = crate::layout::float_rect(overlay, project.floats.len() - 1);
+        if !rect.contains(pos) {
+            return;
+        }
+        if float.mouse_reporting() {
+            if mouse.column > rect.x
+                && mouse.column < rect.x + rect.width - 1
+                && mouse.row > rect.y
+                && mouse.row < rect.y + rect.height - 1
+            {
+                let x = mouse.column - rect.x;
+                let y = mouse.row - rect.y;
+                let _ = float.write_input(&wheel_bytes(up, x, y, float.mouse_sgr_encoding()));
+            }
+        } else if up {
+            float.scroll_up(SCROLL_LINES);
+        } else {
+            float.scroll_down(SCROLL_LINES);
+        }
+        return;
+    }
     let (_, main, _) = crate::layout::frame_areas(frame_area, sidebar_visible);
     let visible: Vec<&crate::pane::Pane> =
         project.panes.iter().filter(|p| !p.hidden).collect();
     let rects = crate::layout::pane_rects(main, visible.len(), project.col_split, project.row_split);
-    let pos = Position::new(mouse.column, mouse.row);
     let Some((pane, rect)) = visible
         .iter()
         .zip(rects.iter())
@@ -69,6 +97,14 @@ fn click(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
         app.mode,
         InputMode::Palette | InputMode::Finder | InputMode::LineInput(_)
     ) {
+        return;
+    }
+    // Floats are modal — clicks can't reach the grid or sidebar behind.
+    if app
+        .active_project()
+        .map(|p| p.top_float().is_some())
+        .unwrap_or(false)
+    {
         return;
     }
     let pos = Position::new(mouse.column, mouse.row);
@@ -157,7 +193,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             }
             let mut pending = Vec::new();
             if let Some(project) = app.active_project_mut() {
-                if let Some(pane) = project.active_pane_mut() {
+                // A float is modal — it owns keystrokes while it's open.
+                // (Two-step lookup: NLL rejects or_else reborrowing project.)
+                let pane = if project.top_float().is_some() {
+                    project.top_float_mut()
+                } else {
+                    project.active_pane_mut()
+                };
+                if let Some(pane) = pane {
                     let bytes = key_event_to_bytes(key);
                     if !bytes.is_empty() {
                         pane.scroll_to_bottom();
@@ -177,7 +220,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             match key.code {
                 KeyCode::Char('q') => app.should_quit = true,
                 KeyCode::Char('n') => app.spawn_pane(None),
-                KeyCode::Char('x') => app.close_active_pane(),
+                // Floats pop first — the popup is the obvious close target.
+                KeyCode::Char('x') => {
+                    if !app.close_float() {
+                        app.close_active_pane();
+                    }
+                }
                 KeyCode::Left | KeyCode::Char('h') => {
                     if let Some(p) = app.active_project_mut() {
                         p.prev_pane();
@@ -204,7 +252,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 }
                 KeyCode::Char('b') => app.toggle_sidebar(),
                 KeyCode::Char('g') => app.enter_sidebar(),
-                KeyCode::Char('G') => app.spawn_pane(Some("lazygit")),
+                // exec'd: `q` in lazygit exits the shell → popup auto-closes.
+                KeyCode::Char('G') => app.spawn_float("lazygit", "exec lazygit"),
                 KeyCode::Char('H') => app.hide_active_pane(),
                 KeyCode::Char('d') => {
                     // A keeper's own socket is always alive — only refuse
@@ -309,11 +358,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                             .filter(|s| !s.is_empty())
                             .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
                             .unwrap_or_else(|| "nvim".to_string());
-                        let cmd =
-                            format!("{} {}", editor, crate::app::shell_quote(&path.to_string_lossy()));
+                        let cmd = format!(
+                            "exec {} {}",
+                            editor,
+                            crate::app::shell_quote(&path.to_string_lossy())
+                        );
+                        let title = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| editor.clone());
                         app.finder = None;
                         app.mode = InputMode::Normal;
-                        app.spawn_pane(Some(&cmd));
+                        app.spawn_float(&title, &cmd);
                     }
                 }
                 KeyCode::Up => f.move_prev(),
@@ -821,11 +877,12 @@ mod tests {
         assert_eq!(app.sidebar_sel, 0);
         assert_eq!(app.active_project().unwrap().panes.len(), 1);
 
-        // Clicking the selected row activates it — opens the diff pane.
+        // Clicking the selected row activates it — opens the diff float.
         handle_mouse(&mut app, click_at(5, 4), frame80());
-        let panes = &app.active_project().unwrap().panes;
-        assert_eq!(panes.len(), 2);
-        assert!(panes[1]
+        let project = app.active_project().unwrap();
+        assert_eq!(project.panes.len(), 1, "diff is a popup, not a grid pane");
+        assert_eq!(project.floats.len(), 1);
+        assert!(project.floats[0]
             .startup_command
             .as_deref()
             .unwrap()
@@ -929,12 +986,36 @@ mod tests {
     }
 
     #[test]
-    fn leader_capital_g_spawns_lazygit_pane() {
+    fn leader_capital_g_spawns_lazygit_float() {
         let mut app = app_with_one_project();
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('G'), KeyModifiers::SHIFT));
-        let pane = &app.active_project().unwrap().panes[0];
-        assert_eq!(pane.startup_command.as_deref(), Some("lazygit"));
+        let project = app.active_project().unwrap();
+        assert_eq!(project.floats.len(), 1);
+        assert!(project.panes.is_empty(), "popup must not join the grid");
+        // exec'd so lazygit's own `q` exits the shell → popup auto-closes.
+        assert_eq!(project.floats[0].startup_command.as_deref(), Some("exec lazygit"));
+        assert_eq!(project.floats[0].title, "lazygit");
+    }
+
+    #[test]
+    fn leader_x_pops_float_before_closing_grid_pane() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_float("nvim", "exec nvim foo.rs");
+        let project = app.active_project().unwrap();
+        assert_eq!(project.panes.len(), 1);
+        assert_eq!(project.floats.len(), 1);
+
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let project = app.active_project().unwrap();
+        assert!(project.floats.is_empty(), "x pops the popup first");
+        assert_eq!(project.panes.len(), 1, "grid pane survives");
+
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.active_project().unwrap().panes.len(), 0);
     }
 
     #[test]
@@ -955,10 +1036,34 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('f'), KeyModifiers::NONE));
         handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
-        let pane = &app.active_project().unwrap().panes[0];
-        assert!(pane.startup_command.is_some());
-        let cmd = pane.startup_command.clone().unwrap();
-        assert!(cmd.contains("host") || cmd.contains('/'), "expected editor command, got {cmd}");
+        let project = app.active_project().unwrap();
+        assert_eq!(project.floats.len(), 1, "finder opens the editor as a popup");
+        let cmd = project.floats[0].startup_command.clone().unwrap();
+        assert!(cmd.starts_with("exec "), "expected exec'd editor command, got {cmd}");
+    }
+
+    #[test]
+    fn typing_goes_to_the_top_float_not_the_grid() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_float("nvim", "exec nvim foo.rs");
+        // Give BOTH panes scrollback; a keypress snaps only the input
+        // target back to the live view — that identifies the float.
+        {
+            let project = app.active_project().unwrap();
+            for p in project.panes.iter().chain(project.floats.iter()) {
+                let mut parser = p.parser.lock().unwrap();
+                for _ in 0..30 {
+                    parser.process(b"line\r\n");
+                }
+            }
+            project.panes[0].scroll_up(5);
+            project.floats[0].scroll_up(5);
+        }
+        handle_key(&mut app, key(KeyCode::Char('i'), KeyModifiers::NONE));
+        let project = app.active_project().unwrap();
+        assert_eq!(project.floats[0].parser.lock().unwrap().screen().scrollback(), 0);
+        assert_eq!(project.panes[0].parser.lock().unwrap().screen().scrollback(), 5);
     }
 
     #[test]

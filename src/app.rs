@@ -248,12 +248,41 @@ impl App {
         }
     }
 
+    /// Push a floating overlay pane running `cmd` — the popup form of
+    /// spawn_pane for transient tools (editor, lazygit, diffs). The grid
+    /// is untouched; the float owns input while it lives. Callers prefix
+    /// `cmd` with `exec` so a quitting tool auto-closes the popup.
+    pub fn spawn_float(&mut self, title: &str, cmd: &str) {
+        let id = self.alloc_pane_id();
+        let events_tx = self.events_tx.clone();
+        if let Some(project) = self.active_project_mut() {
+            let cwd = project.root.clone();
+            match Pane::spawn(id, title.to_string(), 24, 80, Some(&cwd), events_tx, Some(cmd)) {
+                Ok(pane) => project.floats.push(pane),
+                Err(e) => self.flash(format!("spawn failed: {e}")),
+            }
+        }
+    }
+
+    /// Pop the top float (leader+x while a float is open). Floats skip
+    /// the closed-pane history — a reopened popup would be a bare shell,
+    /// not the tool. Returns false when no float was open.
+    pub fn close_float(&mut self) -> bool {
+        if let Some(project) = self.active_project_mut() {
+            if let Some(mut f) = project.floats.pop() {
+                let _ = f.kill();
+                return true;
+            }
+        }
+        false
+    }
+
     /// Post-fork keeper setup: reader threads died at fork, so each
     /// pane respawns one off its surviving `master`. In-flight git/AI
     /// workers are gone too — clear the flags so polls refire.
     pub fn daemonize(&mut self) {
         for project in &mut self.projects {
-            for pane in &mut project.panes {
+            for pane in project.panes.iter_mut().chain(project.floats.iter_mut()) {
                 pane.respawn_reader(self.events_tx.clone());
             }
         }
@@ -404,7 +433,7 @@ impl App {
         }
         let idx = self.active_project;
         let mut project = self.projects.remove(idx);
-        for pane in project.panes.iter_mut() {
+        for pane in project.panes.iter_mut().chain(project.floats.iter_mut()) {
             let _ = pane.kill();
         }
         self.active_project = idx.min(self.projects.len() - 1);
@@ -493,7 +522,7 @@ impl App {
     }
 
     /// Activate the selected sidebar row — branches `git switch`, files
-    /// open their `git diff HEAD` in a new pane. Shared by Enter in
+    /// open their `git diff HEAD` in a popup float. Shared by Enter in
     /// Sidebar mode and click-on-selected-row in mouse handling.
     pub fn sidebar_activate(&mut self) {
         if self.sidebar_branches {
@@ -510,12 +539,15 @@ impl App {
             }
         } else if let Some(file) = self.sidebar_selected_file() {
             // `diff HEAD` covers staged AND unstaged changes —
-            // plain `diff` leaves staged edits invisible.
+            // plain `diff` leaves staged edits invisible. No `exec`
+            // here: the float stays a live shell showing the diff in
+            // scrollback until leader+x (an exec'd short diff would
+            // exit instantly and the popup would flash closed).
             let cmd = format!(
                 "git --no-pager diff HEAD --color=always -- {}",
                 shell_quote(&file)
             );
-            self.spawn_pane(Some(&cmd));
+            self.spawn_float("git diff", &cmd);
         }
     }
 
@@ -865,6 +897,35 @@ mod tests {
         assert_eq!(app.sidebar_sel, 0); // wraps or clamps to len-1
         app.sidebar_move(-1);
         assert_eq!(app.sidebar_sel, 0);
+    }
+
+    #[test]
+    fn sidebar_file_activates_into_a_diff_float() {
+        let mut app = app_with_one_project();
+        app.git_status = Some(crate::git::GitStatus {
+            branch: "m".into(),
+            files: vec![crate::git::ChangedFile { status: 'M', path: "src/a.rs".into() }],
+        });
+        app.sidebar_sel = 0;
+        app.sidebar_activate();
+        let project = app.active_project().unwrap();
+        assert_eq!(project.floats.len(), 1);
+        assert!(project.panes.is_empty(), "diff opens as popup, not a grid pane");
+        let cmd = project.floats[0].startup_command.as_deref().unwrap();
+        // No `exec` — a short diff must stay up instead of flashing closed.
+        assert_eq!(cmd, "git --no-pager diff HEAD --color=always -- 'src/a.rs'");
+        assert_eq!(project.floats[0].title, "git diff");
+    }
+
+    #[test]
+    fn floats_survive_project_state_but_skip_session_history() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_float("lazygit", "exec lazygit");
+        // Popping a float never lands in the closed-pane reopen history.
+        assert!(app.close_float());
+        assert!(app.closed_panes.is_empty());
+        assert!(!app.close_float(), "second pop is a no-op");
     }
 
     #[test]

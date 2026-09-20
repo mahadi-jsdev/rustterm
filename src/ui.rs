@@ -16,6 +16,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_sidebar(frame, app, sidebar_area);
     }
     draw_panes(frame, app, main_area);
+    // Floats overlay everything except the status bar.
+    let overlay = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    draw_floats(frame, app, overlay);
     draw_status_bar(frame, app, status_area);
 
     if matches!(app.mode, InputMode::Palette) {
@@ -199,6 +205,36 @@ fn highlight_matches(frame: &mut Frame, pane: &Pane, rect: Rect, borders: Border
     }
 }
 
+/// Floating popup panes — drawn in stack order, each offset so the pile
+/// is visible. The top float gets the cyan focus border and the cursor;
+/// deeper floats render dim. Modal: while any exist they own input.
+fn draw_floats(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(project) = app.active_project() else {
+        return;
+    };
+    let last = project.floats.len().saturating_sub(1);
+    for (depth, pane) in project.floats.iter().enumerate() {
+        let rect = crate::layout::float_rect(area, depth);
+        frame.render_widget(Clear, rect);
+        let is_top = depth == last;
+        let border_style = if is_top {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(pane.title.clone());
+        sync_pane_size(pane, block.inner(rect));
+        let cursor = Cursor::default().visibility(is_top);
+        let parser = pane.parser.lock().unwrap();
+        let screen = parser.screen();
+        let widget = PseudoTerminal::new(screen).block(block).cursor(cursor);
+        frame.render_widget(widget, rect);
+    }
+}
+
 fn sync_pane_size(pane: &Pane, inner: Rect) {
     let rows = inner.height.max(1);
     let cols = inner.width.max(1);
@@ -242,7 +278,16 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     String::new()
                 };
-                format!("Ctrl+A for commands{state}{bg}")
+                let floats = app
+                    .active_project()
+                    .map(|p| p.floats.len())
+                    .unwrap_or(0);
+                let fl = if floats > 0 {
+                    format!("  ⬚{floats} popup")
+                } else {
+                    String::new()
+                };
+                format!("Ctrl+A for commands{state}{bg}{fl}")
             }
             InputMode::Leader => {
                 "n new  x close  h/l switch  H hide  [ ] project  +/- split  :/p palette  c add-project  b sidebar  g git  G lazygit  f find  / search  d detach  q quit"
@@ -429,6 +474,39 @@ mod tests {
                 "col {x} is blank — a dead gap column leaked into the grid"
             );
         }
+    }
+
+    #[test]
+    fn float_renders_centered_over_the_grid() {
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.spawn_pane(None);
+        app.spawn_float("my-popup", "exec true");
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // The float's title row: a bordered top edge somewhere mid-screen.
+        let title_cell = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| buffer[(x, y)].symbol() == "m" && row_contains(buffer, y, "my-popup"))
+            .expect("float title not rendered");
+        assert!(title_cell.1 > 0, "float starts below the frame top");
+
+        // The grid pane's own title is still drawn behind the float's
+        // margins (float is 90% wide, so the outer columns stay visible).
+        assert!(buffer_contains(buffer, "pane-"));
+    }
+
+    /// All cells of row `y` joined — for substring checks on one row.
+    fn row_contains(buffer: &Buffer, y: u16, needle: &str) -> bool {
+        let row: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect();
+        row.contains(needle)
     }
 
     #[test]
