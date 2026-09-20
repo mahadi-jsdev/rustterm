@@ -64,13 +64,26 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             }
         })
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Projects"));
+    let projects_focused = matches!(app.mode, InputMode::Sidebar)
+        && app.sidebar_focus == crate::app::SidebarSection::Projects;
+    let projects_border = if projects_focused {
+        Style::default().fg(app.config.accent)
+    } else {
+        Style::default()
+    };
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(projects_border)
+            .title("Projects"),
+    );
     frame.render_widget(list, chunks[0]);
     draw_git_section(frame, app, chunks[1]);
 }
 
 fn draw_git_section(frame: &mut Frame, app: &App, area: Rect) {
-    let focused = matches!(app.mode, InputMode::Sidebar);
+    let focused = matches!(app.mode, InputMode::Sidebar)
+        && app.sidebar_focus == crate::app::SidebarSection::Git;
     let border = if focused {
         Style::default().fg(app.config.accent)
     } else {
@@ -314,7 +327,7 @@ fn draw_selection_overlay(
             let c1 = if r == b.0 { b.1.min(inner_w) } else { inner_w };
             for c in c0..=c1 {
                 if let Some((x, y)) = to_xy((r, c)) {
-                    frame.buffer_mut()[(x, y)].modifier |= Modifier::REVERSED;
+                    frame.buffer_mut()[(x, y)].set_bg(app.config.selection);
                 }
             }
         }
@@ -390,9 +403,15 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),
-            InputMode::Sidebar => {
-                "j/k move  enter open  space stage  b branches  c ai-commit  esc back".to_string()
-            }
+            InputMode::Sidebar => match app.sidebar_focus {
+                crate::app::SidebarSection::Projects => {
+                    "j/k switch  enter open  tab git  esc back".to_string()
+                }
+                crate::app::SidebarSection::Git => {
+                    "j/k move  enter open  space stage  b branches  c ai-commit  tab projects  esc back"
+                        .to_string()
+                }
+            },
             InputMode::Finder => "type to filter  ↑/↓ move  enter open  esc cancel".to_string(),
             InputMode::Copy => {
                 "hjkl move  v select  y copy  PgUp/PgDn page  g/G ends  esc cancel".to_string()
@@ -641,6 +660,41 @@ mod tests {
             .find(|&(x, y)| buffer[(x, y)].symbol() == "▸")
             .expect("active project marker not rendered");
         assert!(buffer[marker].modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn mouse_selection_uses_selection_color_not_reverse() {
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
+        let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
+        let (ptx, _prx) = mpsc::channel();
+        let pane = Pane::spawn(1, "p".into(), 24, 80, None, ptx, None, 10_000).unwrap();
+        pane.parser.lock().unwrap().process(b"select me now\r\n");
+        let pane_id = pane.id;
+        project.panes.push(pane);
+        app.projects.push(project);
+        app.mouse_sel = Some(crate::copy::CopyState {
+            pane_id,
+            cursor: (0, 8), // "select m" of "select me now"
+            anchor: Some((0, 0)),
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // Selected cells carry the config.selection bg — never REVERSED.
+        let selected: Vec<(u16, u16)> = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].bg == app.config.selection)
+            .collect();
+        assert!(!selected.is_empty(), "no selection-colored cells rendered");
+        for pos in &selected {
+            assert!(
+                !buffer[*pos].modifier.contains(Modifier::REVERSED),
+                "selection must be a color, not reverse video"
+            );
+        }
     }
 
     #[test]

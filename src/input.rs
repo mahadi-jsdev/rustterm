@@ -211,9 +211,9 @@ fn mouse_up(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
             .unwrap_or(false);
         if dragged {
             app.mouse_yank();
-        } else {
-            app.mouse_sel = None; // a click, not a selection
         }
+        // The selection is done — copied or not, release clears it.
+        app.mouse_sel = None;
     }
 }
 
@@ -347,6 +347,9 @@ fn click_sidebar(app: &mut App, pos: Position, sidebar: Rect) {
             app.set_active_project(row as usize);
         }
         app.enter_sidebar();
+        // A project click focuses the Projects section — the git panel
+        // isn't what you clicked on.
+        app.sidebar_focus = crate::app::SidebarSection::Projects;
         return;
     }
     if pos.y == git_top {
@@ -356,12 +359,16 @@ fn click_sidebar(app: &mut App, pos: Position, sidebar: Rect) {
     }
     let row = (pos.y - git_top - 1) as usize;
     if row < app.sidebar_items_len() {
-        if matches!(app.mode, InputMode::Sidebar) && app.sidebar_sel == row {
+        if matches!(app.mode, InputMode::Sidebar)
+            && app.sidebar_focus == crate::app::SidebarSection::Git
+            && app.sidebar_sel == row
+        {
             app.sidebar_activate();
         } else {
             if !matches!(app.mode, InputMode::Sidebar) {
                 app.enter_sidebar();
             }
+            app.sidebar_focus = crate::app::SidebarSection::Git;
             app.sidebar_sel = row;
         }
     } else {
@@ -539,25 +546,55 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 app.mode = InputMode::Leader;
                 return;
             }
-            match key.code {
-                KeyCode::Esc => {
-                    app.mode = InputMode::Normal;
-                }
-                // Plain-char bindings require NO modifiers — otherwise e.g.
-                // Ctrl+C would run `git add -A` via the 'c' binding. (Ctrl+A
-                // is intercepted above and can't reach this match.)
-                KeyCode::Char('h') | KeyCode::Char('g') if key.modifiers.is_empty() => {
-                    app.mode = InputMode::Normal;
-                }
-                KeyCode::Char('j') if key.modifiers.is_empty() => app.sidebar_move(1),
-                KeyCode::Down => app.sidebar_move(1),
-                KeyCode::Char('k') if key.modifiers.is_empty() => app.sidebar_move(-1),
-                KeyCode::Up => app.sidebar_move(-1),
-                KeyCode::Char('b') if key.modifiers.is_empty() => app.sidebar_toggle_branches(),
-                KeyCode::Char('c') if key.modifiers.is_empty() => app.start_ai_commit(),
-                KeyCode::Char(' ') => app.sidebar_toggle_stage(),
-                KeyCode::Enter => app.sidebar_activate(),
-                _ => {}
+            // Tab flips focus between the Projects and Git sections.
+            if key.code == KeyCode::Tab {
+                app.sidebar_toggle_focus();
+                return;
+            }
+            match app.sidebar_focus {
+                crate::app::SidebarSection::Projects => match key.code {
+                    KeyCode::Esc => {
+                        app.mode = InputMode::Normal;
+                    }
+                    KeyCode::Char('h') | KeyCode::Char('g') if key.modifiers.is_empty() => {
+                        app.mode = InputMode::Normal;
+                    }
+                    // Moving switches projects live — the row itself is
+                    // the switch (same as clicking through the list).
+                    KeyCode::Char('j') if key.modifiers.is_empty() => {
+                        app.sidebar_project_move(1)
+                    }
+                    KeyCode::Down => app.sidebar_project_move(1),
+                    KeyCode::Char('k') if key.modifiers.is_empty() => {
+                        app.sidebar_project_move(-1)
+                    }
+                    KeyCode::Up => app.sidebar_project_move(-1),
+                    // Enter commits to the chosen project — back to panes.
+                    KeyCode::Enter => {
+                        app.mode = InputMode::Normal;
+                    }
+                    _ => {}
+                },
+                crate::app::SidebarSection::Git => match key.code {
+                    KeyCode::Esc => {
+                        app.mode = InputMode::Normal;
+                    }
+                    // Plain-char bindings require NO modifiers — otherwise
+                    // e.g. Ctrl+C would run `git add -A` via the 'c' binding.
+                    // (The leader is intercepted above and can't reach here.)
+                    KeyCode::Char('h') | KeyCode::Char('g') if key.modifiers.is_empty() => {
+                        app.mode = InputMode::Normal;
+                    }
+                    KeyCode::Char('j') if key.modifiers.is_empty() => app.sidebar_move(1),
+                    KeyCode::Down => app.sidebar_move(1),
+                    KeyCode::Char('k') if key.modifiers.is_empty() => app.sidebar_move(-1),
+                    KeyCode::Up => app.sidebar_move(-1),
+                    KeyCode::Char('b') if key.modifiers.is_empty() => app.sidebar_toggle_branches(),
+                    KeyCode::Char('c') if key.modifiers.is_empty() => app.start_ai_commit(),
+                    KeyCode::Char(' ') => app.sidebar_toggle_stage(),
+                    KeyCode::Enter => app.sidebar_activate(),
+                    _ => {}
+                },
             }
         }
         InputMode::Finder => {
@@ -1566,7 +1603,7 @@ mod tests {
     // content inner (25,1)..(78,21).
 
     #[test]
-    fn drag_selects_and_release_keeps_highlight() {
+    fn drag_selects_and_release_copies() {
         let mut app = app_with_one_project();
         app.spawn_pane(None);
         {
@@ -1582,7 +1619,7 @@ mod tests {
         assert_eq!(app.mouse_sel.as_ref().unwrap().cursor, (0, 5));
         handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 30, 1), frame);
         assert!(!app.mouse_dragging);
-        assert!(app.mouse_sel.is_some(), "highlight lingers after release");
+        assert!(app.mouse_sel.is_none(), "release clears the highlight");
         let (msg, _) = app.status_msg.as_ref().expect("yank flashes");
         assert!(msg.starts_with("copied"), "expected copy flash, got {msg}");
     }
@@ -1665,6 +1702,72 @@ mod tests {
         assert!(app.mouse_dragging, "shift forces local selection");
         assert!(app.mouse_app.is_none());
         handle_mouse(&mut app, ev(MouseEventKind::Up(MouseButton::Left)), frame);
+    }
+
+    #[test]
+    fn click_project_row_focuses_projects_section() {
+        let mut app = app_with_one_project();
+        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        handle_mouse(&mut app, click_at(5, 2), frame80());
+        assert_eq!(app.active_project, 1);
+        assert!(matches!(app.mode, InputMode::Sidebar));
+        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Projects,
+            "clicking a project focuses Projects, not Git");
+    }
+
+    #[test]
+    fn projects_focus_jk_switches_projects_live() {
+        let mut app = app_with_one_project();
+        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.projects.push(Project::new("third".into(), PathBuf::from("/tmp")));
+        app.enter_sidebar();
+        app.sidebar_focus = crate::app::SidebarSection::Projects;
+        handle_key(&mut app, key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.active_project, 1);
+        handle_key(&mut app, key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.active_project, 2);
+        handle_key(&mut app, key(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.active_project, 1);
+        // Git keys do nothing while Projects is focused.
+        handle_key(&mut app, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.status_msg.is_none());
+        // Enter commits to the project — back to panes.
+        handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Normal));
+        assert_eq!(app.active_project, 1);
+    }
+
+    #[test]
+    fn tab_flips_sidebar_focus_and_git_keys_stay_git() {
+        let mut app = app_with_one_project();
+        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.enter_sidebar();
+        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Git,
+            "leader g enters at Git");
+        handle_key(&mut app, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Projects);
+        // j navigates projects while Projects-focused, not git rows.
+        handle_key(&mut app, key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.active_project, 1);
+        assert_eq!(app.sidebar_sel, 0);
+        handle_key(&mut app, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Git);
+    }
+
+    #[test]
+    fn click_git_row_focuses_git_section() {
+        let root = git_repo("gfocus");
+        let (tx, _rx) = mpsc::channel();
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), root.clone()));
+        app.projects.push(Project::new("other".into(), PathBuf::from("/tmp")));
+        app.spawn_pane(None);
+        // Start Projects-focused, then click a git row — focus follows.
+        app.enter_sidebar();
+        app.sidebar_focus = crate::app::SidebarSection::Projects;
+        handle_mouse(&mut app, click_at(5, 5), frame80()); // first git row
+        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Git);
     }
 
     #[test]

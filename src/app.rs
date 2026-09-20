@@ -8,6 +8,14 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
 
+/// Which sidebar section owns keyboard focus in Sidebar mode —
+/// Projects (the picker) or Git (file/branch ops). Tab flips it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidebarSection {
+    Projects,
+    Git,
+}
+
 pub enum InputMode {
     Normal,
     Leader,
@@ -51,6 +59,9 @@ pub struct App {
     pub app_tx: mpsc::Sender<AppEvent>,
     pub sidebar_sel: usize,
     pub sidebar_branches: bool,
+    /// Focused sidebar section — `enter_sidebar` (leader g) lands on
+    /// Git; clicking a project row focuses Projects.
+    pub sidebar_focus: SidebarSection,
     /// Cached branch list — populated on enter_sidebar/toggle so the
     /// renderer and len helpers never shell out to git per frame.
     pub sidebar_branch_list: Vec<String>,
@@ -117,6 +128,7 @@ impl App {
             last_watch_poll: Instant::now(),
             app_tx,
             sidebar_sel: 0,
+            sidebar_focus: SidebarSection::Git,
             sidebar_branches: false,
             sidebar_branch_list: vec![],
             git_status: None,
@@ -536,7 +548,32 @@ impl App {
         }
         self.sidebar_sel = 0;
         self.sidebar_branches = false;
+        // `leader g` / programmatic entry lands on Git — that's where
+        // the actions live; clicking a project row overrides to
+        // Projects after calling this.
+        self.sidebar_focus = SidebarSection::Git;
         self.mode = InputMode::Sidebar;
+    }
+
+    /// Tab — flip keyboard focus between the Projects and Git sections.
+    pub fn sidebar_toggle_focus(&mut self) {
+        self.sidebar_focus = match self.sidebar_focus {
+            SidebarSection::Projects => SidebarSection::Git,
+            SidebarSection::Git => SidebarSection::Projects,
+        };
+    }
+
+    /// j/k while Projects-focused — moving switches projects live,
+    /// same as clicking through the list.
+    pub fn sidebar_project_move(&mut self, delta: i32) {
+        let n = self.projects.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let next = (self.active_project as i32 + delta).clamp(0, n - 1) as usize;
+        if next != self.active_project {
+            self.set_active_project(next);
+        }
     }
 
     /// Leader `b` — hide/show the whole sidebar. Hiding while focused

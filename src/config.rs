@@ -21,6 +21,8 @@ pub struct Config {
     pub float_pct: u16,
     /// Focused-pane border accent (name or #rrggbb).
     pub accent: Color,
+    /// Text-selection background — mouse drag and copy-mode ranges.
+    pub selection: Color,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +34,7 @@ struct Raw {
     scrollback: Option<usize>,
     float_pct: Option<u16>,
     accent: Option<String>,
+    selection: Option<String>,
 }
 
 impl Default for Config {
@@ -44,6 +47,8 @@ impl Default for Config {
             scrollback: 10_000,
             float_pct: 90,
             accent: Color::Cyan,
+            // VS Code selection blue — reads as "selected" on any theme.
+            selection: Color::Rgb(0x26, 0x4f, 0x78),
         }
     }
 }
@@ -100,6 +105,9 @@ fn apply(raw: Raw) -> Config {
     }
     if let Some(a) = raw.accent {
         c.accent = parse_color(&a).unwrap_or(c.accent);
+    }
+    if let Some(s) = raw.selection {
+        c.selection = parse_color(&s).unwrap_or(c.selection);
     }
     c
 }
@@ -188,7 +196,7 @@ mod tests {
         let c = apply(Raw {
             leader: Some("nope".into()), editor: None, sidebar_width: None,
             scroll_lines: None, scrollback: None, float_pct: None,
-            accent: Some("banana".into()),
+            accent: Some("banana".into()), selection: None,
         });
         assert_eq!(c.leader_char, 'a');
         assert_eq!(c.accent, Color::Cyan);
@@ -198,7 +206,8 @@ mod tests {
     fn clamps_out_of_range_values() {
         let c = apply(Raw {
             leader: None, editor: None, sidebar_width: Some(200),
-            scroll_lines: Some(0), scrollback: Some(5), float_pct: Some(5), accent: None,
+            scroll_lines: Some(0), scrollback: Some(5), float_pct: Some(5),
+            accent: None, selection: None,
         });
         assert_eq!(c.sidebar_width, 80);
         assert_eq!(c.scroll_lines, 1);
