@@ -1,6 +1,7 @@
 use crate::pane::{Pane, PaneEvent, PaneId};
 use crate::project::Project;
 use crate::text_input::LineEdit;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -74,6 +75,17 @@ pub struct App {
     /// Copy-mode state (leader+[). The pane is addressed by id — a
     /// closed pane just invalidates the mode on next access.
     pub copy: Option<crate::copy::CopyState>,
+    /// Mouse drag-selection — same CopyState shape (anchor = press
+    /// point, cursor = drag head), independent of copy mode. Persists
+    /// after release so the highlight lingers; cleared on next press.
+    pub mouse_sel: Option<crate::copy::CopyState>,
+    /// True while the left button is held — Drag events extend
+    /// mouse_sel only while dragging.
+    pub mouse_dragging: bool,
+    /// Pane that owns the mouse for this press: its app has mouse
+    /// reporting and Shift wasn't held, so press/drag/release forward
+    /// to the PTY instead of selecting.
+    pub mouse_app: Option<PaneId>,
     /// ~/.config/rustterm/config.toml — loaded in main, defaults here
     /// so tests never read the user's real config.
     pub config: crate::config::Config,
@@ -117,6 +129,9 @@ impl App {
             detach_requested: false,
             is_keeper: false,
             copy: None,
+            mouse_sel: None,
+            mouse_dragging: false,
+            mouse_app: None,
             config: crate::config::Config::default(),
         }
     }
@@ -765,6 +780,80 @@ impl App {
             }
         }
         self.mode = InputMode::Normal;
+    }
+
+    /// The rendered rect of a pane: the top float's popup rect, or its
+    /// grid cell (render order, zoom-aware). None for buried floats,
+    /// hidden panes, or panes in other projects — i.e. not selectable.
+    pub fn pane_screen_rect(&self, id: PaneId, main: Rect, overlay: Rect) -> Option<Rect> {
+        let project = self.active_project()?;
+        if project.top_float().map(|f| f.id) == Some(id) {
+            return Some(crate::layout::float_rect(
+                overlay,
+                project.floats.len() - 1,
+                self.config.float_pct,
+            ));
+        }
+        let render = project.render_indices();
+        let vi = render.iter().position(|&i| project.panes[i].id == id)?;
+        let rects =
+            crate::layout::pane_rects(main, render.len(), project.col_split, project.row_split);
+        rects.get(vi).copied()
+    }
+
+    /// Map a screen position inside a pane's rendered rect to an
+    /// absolute grid cell (row spans scrollback, col) — the inverse of
+    /// the selection overlay's to_xy. Content starts one cell in on
+    /// every side; positions on borders return None.
+    pub fn cell_in_pane(&self, id: PaneId, pos: Position, rect: Rect) -> Option<(usize, usize)> {
+        let inner = Rect {
+            x: rect.x + 1,
+            y: rect.y + 1,
+            width: rect.width.saturating_sub(2),
+            height: rect.height.saturating_sub(2),
+        };
+        if !inner.contains(pos) || inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        let pane = self.pane_by_id(id)?;
+        let mut p = pane.parser.lock().unwrap();
+        let s = p.screen_mut();
+        let sb = crate::search::scrollback_len(s);
+        let view_top = sb - s.scrollback();
+        let (h, w) = s.size();
+        let row = (view_top + (pos.y - inner.y) as usize)
+            .min((sb + h as usize).saturating_sub(1));
+        let col = ((pos.x - inner.x) as usize).min((w as usize).saturating_sub(1));
+        Some((row, col))
+    }
+
+    /// Release-to-copy: yank the dragged selection via OSC52. The
+    /// highlight lingers (mouse_sel stays Some) until the next press;
+    /// the view keeps its scroll position — no snap-to-bottom like
+    /// copy mode's exit.
+    pub fn mouse_yank(&mut self) {
+        let Some((pane_id, anchor, cursor)) = self
+            .mouse_sel
+            .as_ref()
+            .map(|s| (s.pane_id, s.anchor, s.cursor))
+        else {
+            return;
+        };
+        let Some(pane) = self.pane_by_id(pane_id) else {
+            self.mouse_sel = None;
+            return;
+        };
+        let text = {
+            let mut p = pane.parser.lock().unwrap();
+            let lines = crate::search::grid_lines(p.screen_mut());
+            crate::copy::extract(&lines, anchor.unwrap_or(cursor), cursor)
+        };
+        if text.is_empty() {
+            self.flash("nothing to copy");
+        } else {
+            crate::copy::yank(&text);
+            self.flash(format!("copied {} chars", text.chars().count()));
+        }
     }
 
     /// Activate the selected sidebar row — branches `git switch`, files

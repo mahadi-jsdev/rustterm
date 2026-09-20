@@ -24,6 +24,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     };
     draw_floats(frame, app, overlay);
     draw_copy_overlay(frame, app, main_area, overlay);
+    draw_mouse_sel_overlay(frame, app, main_area, overlay);
     draw_status_bar(frame, app, status_area);
 
     if matches!(app.mode, InputMode::Palette) {
@@ -243,18 +244,39 @@ fn draw_floats(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Copy-mode overlay: REVERSED selection cells + a cyan cursor cell.
-/// Locates the copy pane's rendered rect — a grid pane (respecting
-/// zoom) or the top float — then maps absolute grid coords through the
-/// pane's current scroll offset.
+/// Copy-mode overlay: REVERSED selection cells + an accent cursor cell.
 fn draw_copy_overlay(frame: &mut Frame, app: &App, main_area: Rect, overlay: Rect) {
-    let Some(copy) = &app.copy else { return };
+    if let Some(copy) = &app.copy {
+        draw_selection_overlay(frame, app, main_area, overlay, copy, true);
+    }
+}
+
+/// Mouse drag-selection overlay — same reversed-cells rendering; no
+/// cursor cell (the drag head isn't a text cursor).
+fn draw_mouse_sel_overlay(frame: &mut Frame, app: &App, main_area: Rect, overlay: Rect) {
+    if let Some(sel) = &app.mouse_sel {
+        draw_selection_overlay(frame, app, main_area, overlay, sel, false);
+    }
+}
+
+/// REVERSED-cell rendering of a selection over a pane's rendered rect —
+/// a grid pane (respecting zoom) or the top float — mapping absolute
+/// grid coords through the pane's current scroll offset. Shared by
+/// copy mode and mouse drag-select.
+fn draw_selection_overlay(
+    frame: &mut Frame,
+    app: &App,
+    main_area: Rect,
+    overlay: Rect,
+    sel: &crate::copy::CopyState,
+    show_cursor: bool,
+) {
     let Some(project) = app.active_project() else { return };
-    let rect = if project.top_float().map(|f| f.id) == Some(copy.pane_id) {
+    let rect = if project.top_float().map(|f| f.id) == Some(sel.pane_id) {
         crate::layout::float_rect(overlay, project.floats.len() - 1, app.config.float_pct)
     } else {
         let render = project.render_indices();
-        let Some(vi) = render.iter().position(|&i| project.panes[i].id == copy.pane_id) else {
+        let Some(vi) = render.iter().position(|&i| project.panes[i].id == sel.pane_id) else {
             return;
         };
         let rects = pane_rects(main_area, render.len(), project.col_split, project.row_split);
@@ -262,7 +284,7 @@ fn draw_copy_overlay(frame: &mut Frame, app: &App, main_area: Rect, overlay: Rec
     };
     // Grid panes always draw LEFT+TOP (only RIGHT/BOTTOM are shared), so
     // content starts one cell in from the rect origin either way.
-    let Some(pane) = app.pane_by_id(copy.pane_id) else { return };
+    let Some(pane) = app.pane_by_id(sel.pane_id) else { return };
     let (view_top, h) = match pane.parser.lock() {
         Ok(mut p) => {
             let s = p.screen_mut();
@@ -282,8 +304,8 @@ fn draw_copy_overlay(frame: &mut Frame, app: &App, main_area: Rect, overlay: Rec
             None
         }
     };
-    if let Some(anchor) = copy.anchor {
-        let (a, b) = if anchor <= copy.cursor { (anchor, copy.cursor) } else { (copy.cursor, anchor) };
+    if let Some(anchor) = sel.anchor {
+        let (a, b) = if anchor <= sel.cursor { (anchor, sel.cursor) } else { (sel.cursor, anchor) };
         let inner_w = rect.width.saturating_sub(2) as usize;
         for r in a.0..=b.0 {
             let c0 = if r == a.0 { a.1 } else { 0 };
@@ -297,10 +319,12 @@ fn draw_copy_overlay(frame: &mut Frame, app: &App, main_area: Rect, overlay: Rec
             }
         }
     }
-    if let Some((x, y)) = to_xy(copy.cursor) {
-        let cell = &mut frame.buffer_mut()[(x, y)];
-        cell.set_bg(app.config.accent);
-        cell.set_fg(Color::Black);
+    if show_cursor {
+        if let Some((x, y)) = to_xy(sel.cursor) {
+            let cell = &mut frame.buffer_mut()[(x, y)];
+            cell.set_bg(app.config.accent);
+            cell.set_fg(Color::Black);
+        }
     }
 }
 

@@ -6,16 +6,214 @@ use crate::text_input::{EditResult, LineEdit};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-/// Route a mouse event. Wheel events scroll the scrollback of the pane
-/// under the cursor — unless that pane's app enabled mouse reporting,
-/// in which case they're forwarded to the PTY in its requested encoding.
-/// Left-click focuses panes and drives the sidebar (select/activate).
+/// Route a mouse event. Wheel scrolls the pane under the cursor (or
+/// forwards to it when the app enabled mouse reporting). Left press
+/// focuses panes and drives the sidebar AND anchors a text selection:
+/// drag extends it (auto-scrolling scrollback at the pane's top/bottom
+/// edge), release yanks it to the clipboard via OSC52. Apps with mouse
+/// reporting get press/drag/release forwarded; Shift bypasses to local
+/// select, same as alacritty/tmux.
 pub fn handle_mouse(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     match mouse.kind {
         MouseEventKind::ScrollUp => wheel_scroll(app, mouse, frame_area, true),
         MouseEventKind::ScrollDown => wheel_scroll(app, mouse, frame_area, false),
-        MouseEventKind::Down(MouseButton::Left) => click(app, mouse, frame_area),
+        MouseEventKind::Down(MouseButton::Left) => mouse_down(app, mouse, frame_area),
+        MouseEventKind::Drag(MouseButton::Left) => mouse_drag(app, mouse, frame_area),
+        MouseEventKind::Up(MouseButton::Left) => mouse_up(app, mouse, frame_area),
         _ => {}
+    }
+}
+
+/// (main grid area, float overlay area) — the two regions selection
+/// coordinates can come from; the status bar is never selectable.
+fn selectable_areas(app: &App, frame_area: Rect) -> (Rect, Rect) {
+    let overlay = Rect {
+        height: frame_area.height.saturating_sub(1),
+        ..frame_area
+    };
+    let (_, main, _) =
+        crate::layout::frame_areas(frame_area, app.sidebar_visible, app.config.sidebar_width);
+    (main, overlay)
+}
+
+/// Left press: focus/sidebar via `click`, then anchor a mouse selection
+/// on the pane under the cursor — or hand the press to its app when it
+/// reports mouse events and Shift isn't held. Floats are modal: only
+/// the top float's interior can anchor/select.
+fn mouse_down(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
+    app.mouse_sel = None;
+    app.mouse_dragging = false;
+    app.mouse_app = None;
+    if matches!(
+        app.mode,
+        InputMode::Palette | InputMode::Finder | InputMode::LineInput(_)
+    ) {
+        return;
+    }
+    let pos = Position::new(mouse.column, mouse.row);
+    let (main, overlay) = selectable_areas(app, frame_area);
+
+    // Copy mode: a click inside the copy pane places its cursor.
+    if matches!(app.mode, InputMode::Copy) {
+        if let Some(id) = app.copy.as_ref().map(|c| c.pane_id) {
+            if let Some(rect) = app.pane_screen_rect(id, main, overlay) {
+                if let Some(cell) = app.cell_in_pane(id, pos, rect) {
+                    if let Some(copy) = app.copy.as_mut() {
+                        copy.cursor = cell;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    let top_float = app
+        .active_project()
+        .and_then(|p| p.top_float())
+        .map(|f| f.id);
+    let target = if let Some(fid) = top_float {
+        // Modal: the float interior is the only selectable target.
+        app.pane_screen_rect(fid, main, overlay)
+            .and_then(|r| app.cell_in_pane(fid, pos, r).map(|cell| (fid, r, cell)))
+    } else {
+        // Sidebar/status-bar presses are UI clicks — never selections.
+        click(app, mouse, frame_area);
+        let Some(project) = app.active_project() else { return };
+        let render = project.render_indices();
+        let rects =
+            crate::layout::pane_rects(main, render.len(), project.col_split, project.row_split);
+        rects
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.contains(pos))
+            .and_then(|(vi, r)| {
+                let id = project.panes[render[vi]].id;
+                app.cell_in_pane(id, pos, *r).map(|cell| (id, *r, cell))
+            })
+    };
+    let Some((id, rect, cell)) = target else { return };
+    let Some(pane) = app.pane_by_id(id) else { return };
+    if pane.mouse_reporting() && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+        // The app owns the mouse: forward the press, remember it owns
+        // drag/release until the button comes up.
+        let sgr = pane.mouse_sgr_encoding();
+        let x = pos.x - rect.x;
+        let y = pos.y - rect.y;
+        let _ = pane.write_input(&btn_bytes(0, false, x, y, sgr));
+        app.mouse_app = Some(id);
+    } else {
+        app.mouse_sel = Some(crate::copy::CopyState {
+            pane_id: id,
+            cursor: cell,
+            anchor: Some(cell),
+        });
+        app.mouse_dragging = true;
+    }
+}
+
+/// Left drag: extends an in-progress selection — overshooting the
+/// pane's top/bottom edge scrolls it so long scrollback selections
+/// work — or forwards motion to the mouse-reporting app that took the
+/// press. In copy mode a drag moves the cursor (anchoring on first
+/// move so drag-select works there too).
+fn mouse_drag(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
+    let pos = Position::new(mouse.column, mouse.row);
+    let (main, overlay) = selectable_areas(app, frame_area);
+    if app.mouse_dragging {
+        let Some(id) = app.mouse_sel.as_ref().map(|s| s.pane_id) else { return };
+        let Some(rect) = app.pane_screen_rect(id, main, overlay) else {
+            app.mouse_sel = None;
+            app.mouse_dragging = false;
+            return;
+        };
+        let inner = Rect {
+            x: rect.x + 1,
+            y: rect.y + 1,
+            width: rect.width.saturating_sub(2),
+            height: rect.height.saturating_sub(2),
+        };
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        // Edge auto-scroll: overshoot above/below the content area
+        // scrolls scrollback (capped so a wild flick doesn't jump far),
+        // then the clamped position selects to the edge row.
+        if let Some(pane) = app.pane_by_id(id) {
+            if pos.y < inner.y {
+                pane.scroll_up((inner.y - pos.y) as usize);
+            } else if pos.y >= inner.y + inner.height {
+                pane.scroll_down((pos.y - (inner.y + inner.height - 1)) as usize);
+            }
+        }
+        let clamped = Position::new(
+            pos.x.clamp(inner.x, inner.x + inner.width - 1),
+            pos.y.clamp(inner.y, inner.y + inner.height - 1),
+        );
+        if let Some(cell) = app.cell_in_pane(id, clamped, rect) {
+            if let Some(sel) = app.mouse_sel.as_mut() {
+                sel.cursor = cell;
+            }
+        }
+        return;
+    }
+    if let Some(id) = app.mouse_app {
+        let Some(rect) = app.pane_screen_rect(id, main, overlay) else {
+            app.mouse_app = None;
+            return;
+        };
+        let Some(pane) = app.pane_by_id(id) else {
+            app.mouse_app = None;
+            return;
+        };
+        let x = pos.x.clamp(rect.x + 1, rect.x + rect.width - 2) - rect.x;
+        let y = pos.y.clamp(rect.y + 1, rect.y + rect.height - 2) - rect.y;
+        let _ = pane.write_input(&btn_bytes(32, false, x, y, pane.mouse_sgr_encoding()));
+        return;
+    }
+    if matches!(app.mode, InputMode::Copy) {
+        if let Some(id) = app.copy.as_ref().map(|c| c.pane_id) {
+            if let Some(rect) = app.pane_screen_rect(id, main, overlay) {
+                if let Some(cell) = app.cell_in_pane(id, pos, rect) {
+                    if let Some(copy) = app.copy.as_mut() {
+                        if copy.anchor.is_none() {
+                            copy.anchor = Some(copy.cursor);
+                        }
+                        copy.cursor = cell;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Left release: a real drag (anchor ≠ cursor) yanks via OSC52 and the
+/// highlight lingers; a same-cell release was just a click, so the
+/// press-time anchor is dropped. A mouse-app press gets its release.
+fn mouse_up(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
+    if let Some(id) = app.mouse_app.take() {
+        if let (Some(rect), Some(pane)) = (
+            app.pane_screen_rect(id, selectable_areas(app, frame_area).0,
+                selectable_areas(app, frame_area).1),
+            app.pane_by_id(id),
+        ) {
+            let pos = Position::new(mouse.column, mouse.row);
+            let x = pos.x.clamp(rect.x + 1, rect.x + rect.width - 2) - rect.x;
+            let y = pos.y.clamp(rect.y + 1, rect.y + rect.height - 2) - rect.y;
+            let _ = pane.write_input(&btn_bytes(0, true, x, y, pane.mouse_sgr_encoding()));
+        }
+    }
+    if app.mouse_dragging {
+        app.mouse_dragging = false;
+        let dragged = app
+            .mouse_sel
+            .as_ref()
+            .map(|s| s.anchor != Some(s.cursor))
+            .unwrap_or(false);
+        if dragged {
+            app.mouse_yank();
+        } else {
+            app.mouse_sel = None; // a click, not a selection
+        }
     }
 }
 
@@ -168,6 +366,20 @@ fn click_sidebar(app: &mut App, pos: Position, sidebar: Rect) {
         }
     } else {
         app.enter_sidebar();
+    }
+}
+
+/// Encode a button event for a mouse-reporting app: SGR
+/// `\x1b[<code;x;yM` (release uses `m`), or legacy X10 `\x1b[M` +
+/// btn+32 bytes (release always btn 3; drag adds the 32 motion bit).
+/// `code` is 0 for press/release, 32 for left-drag motion.
+fn btn_bytes(code: u8, release: bool, x: u16, y: u16, sgr: bool) -> Vec<u8> {
+    if sgr {
+        let tail = if release { 'm' } else { 'M' };
+        format!("\x1b[<{code};{x};{y}{tail}").into_bytes()
+    } else {
+        let btn = 32 + if release { 3 } else { code };
+        vec![0x1b, b'[', b'M', btn, (x as u8).saturating_add(32), (y as u8).saturating_add(32)]
     }
 }
 
@@ -1347,5 +1559,148 @@ mod tests {
         assert!(!app.ai_in_flight);
         assert!(app.status_msg.is_none(), "no ai-commit path should have run");
         assert!(matches!(app.mode, InputMode::Sidebar), "mode unchanged");
+    }
+
+    // ---- mouse select + copy ----
+    // Single pane: frame 80x24 → sidebar 24 wide, pane rect (24,0,56,23),
+    // content inner (25,1)..(78,21).
+
+    #[test]
+    fn drag_selects_and_release_keeps_highlight() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            pane.parser.lock().unwrap().process(b"hello world\r\n");
+        }
+        let frame = Rect::new(0, 0, 80, 24);
+        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 26, 1), frame);
+        assert!(app.mouse_dragging);
+        let sel = app.mouse_sel.as_ref().expect("press anchors a selection");
+        assert_eq!(sel.anchor, Some((0, 1))); // abs row 0, col 1 ('e')
+        handle_mouse(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 30, 1), frame);
+        assert_eq!(app.mouse_sel.as_ref().unwrap().cursor, (0, 5));
+        handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 30, 1), frame);
+        assert!(!app.mouse_dragging);
+        assert!(app.mouse_sel.is_some(), "highlight lingers after release");
+        let (msg, _) = app.status_msg.as_ref().expect("yank flashes");
+        assert!(msg.starts_with("copied"), "expected copy flash, got {msg}");
+    }
+
+    #[test]
+    fn click_without_drag_selects_nothing() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        let frame = Rect::new(0, 0, 80, 24);
+        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 30, 5), frame);
+        handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 30, 5), frame);
+        assert!(app.mouse_sel.is_none(), "same-cell release is a click, not a selection");
+        assert!(app.status_msg.is_none());
+    }
+
+    #[test]
+    fn press_on_border_or_sidebar_anchors_nothing() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        let frame = Rect::new(0, 0, 80, 24);
+        // Pane's left border column (x=24) is not content.
+        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 24, 5), frame);
+        assert!(app.mouse_sel.is_none());
+        assert!(!app.mouse_dragging);
+        // Sidebar content row — a UI click, not text.
+        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 5, 5), frame);
+        assert!(app.mouse_sel.is_none());
+    }
+
+    #[test]
+    fn drag_past_top_edge_scrolls_scrollback() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        grow_scrollback(&app);
+        let frame = Rect::new(0, 0, 80, 24);
+        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 30, 1), frame);
+        handle_mouse(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 30, 0), frame);
+        let off = pane_scrollback(&app);
+        assert!(off > 0, "overshoot above the pane scrolled up");
+        // The cursor tracked into scrollback: it's above the anchor row.
+        let sel = app.mouse_sel.as_ref().unwrap();
+        assert!(sel.cursor.0 < sel.anchor.unwrap().0);
+    }
+
+    #[test]
+    fn reporting_app_gets_press_and_release() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            // App enables mouse reporting + SGR encoding.
+            pane.parser.lock().unwrap().process(b"\x1b[?1000h\x1b[?1006h");
+        }
+        let frame = Rect::new(0, 0, 80, 24);
+        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 30, 5), frame);
+        assert!(app.mouse_sel.is_none(), "no local selection for a reporting app");
+        assert!(app.mouse_app.is_some(), "press handed to the app");
+        handle_mouse(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 35, 6), frame);
+        handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 35, 6), frame);
+        assert!(app.mouse_app.is_none(), "release ends app capture");
+        assert!(app.status_msg.is_none(), "no copy flash");
+    }
+
+    #[test]
+    fn shift_drag_bypasses_app_capture_to_select() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            pane.parser.lock().unwrap().process(b"\x1b[?1000h\x1b[?1006hshift me\r\n");
+        }
+        let frame = Rect::new(0, 0, 80, 24);
+        let ev = |kind| MouseEvent {
+            kind,
+            column: 30,
+            row: 5,
+            modifiers: KeyModifiers::SHIFT,
+        };
+        handle_mouse(&mut app, ev(MouseEventKind::Down(MouseButton::Left)), frame);
+        assert!(app.mouse_dragging, "shift forces local selection");
+        assert!(app.mouse_app.is_none());
+        handle_mouse(&mut app, ev(MouseEventKind::Up(MouseButton::Left)), frame);
+    }
+
+    #[test]
+    fn float_interior_selects_but_outside_is_swallowed() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_float("pop", "echo hi");
+        let frame = Rect::new(0, 0, 80, 24);
+        let fid = app.active_project().unwrap().top_float().unwrap().id;
+        // Float interior: centered 90% of 80x23 → inner ~(5,2)..(75,20).
+        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 30, 10), frame);
+        let sel = app.mouse_sel.as_ref().expect("press inside float anchors");
+        assert_eq!(sel.pane_id, fid, "selection targets the float, not the grid");
+        // Outside the float — modal swallow, no selection.
+        handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 30, 10), frame);
+        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 2, 2), frame);
+        assert!(app.mouse_sel.is_none(), "outside a modal float selects nothing");
+    }
+
+    #[test]
+    fn copy_mode_click_places_cursor_and_drag_selects() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        {
+            let pane = &app.active_project().unwrap().panes[0];
+            pane.parser.lock().unwrap().process(b"copy target\r\n");
+        }
+        app.enter_copy();
+        let frame = Rect::new(0, 0, 80, 24);
+        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 30, 1), frame);
+        assert!(matches!(app.mode, InputMode::Copy), "click stays in copy mode");
+        assert_eq!(app.copy.as_ref().unwrap().cursor, (0, 5));
+        assert!(app.copy.as_ref().unwrap().anchor.is_none());
+        handle_mouse(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 34, 1), frame);
+        let copy = app.copy.as_ref().unwrap();
+        assert_eq!(copy.anchor, Some((0, 5)), "first drag anchors at pre-drag cursor");
+        assert_eq!(copy.cursor, (0, 9));
     }
 }
