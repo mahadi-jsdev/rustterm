@@ -36,8 +36,12 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     if pane.mouse_reporting() {
         // Forward only when the cursor is on a real app cell (inside the
         // border); coords are 1-based relative to the pane's inner area.
-        let inner_right = rect.x + rect.width.saturating_sub(1);
-        let inner_bottom = rect.y + rect.height.saturating_sub(1);
+        // Dropped facing borders are content cells, not boundary.
+        let borders = crate::layout::pane_borders(&rects, *rect);
+        let inner_right =
+            rect.x + rect.width - u16::from(borders.contains(ratatui::widgets::Borders::RIGHT));
+        let inner_bottom =
+            rect.y + rect.height - u16::from(borders.contains(ratatui::widgets::Borders::BOTTOM));
         if mouse.column > rect.x && mouse.column < inner_right
             && mouse.row > rect.y && mouse.row < inner_bottom
         {

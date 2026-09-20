@@ -116,7 +116,6 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
     let rects = pane_rects(area, visible.len(), project.col_split, project.row_split);
     for ((index, pane), rect) in visible.iter().zip(rects.iter()) {
         let index = *index;
-        sync_pane_size(*pane, *rect);
         let mut title = pane.title.clone();
         if pane.waiting {
             title.push_str(" ●");
@@ -149,24 +148,26 @@ fn draw_panes(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default()
         };
+        let borders = crate::layout::pane_borders(&rects, *rect);
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(borders)
             .border_style(border_style)
             .title(title);
+        sync_pane_size(*pane, block.inner(*rect));
         let cursor = Cursor::default().visibility(is_active);
         let parser = pane.parser.lock().unwrap();
         let screen = parser.screen();
         let widget = PseudoTerminal::new(screen).block(block).cursor(cursor);
         frame.render_widget(widget, *rect);
         drop(parser); // highlight_matches re-locks for the scrollback math
-        highlight_matches(frame, *pane, *rect);
+        highlight_matches(frame, *pane, *rect, borders);
     }
 }
 
 /// Post-render pass: REVERSED on each visible search-match cell. Match rows
 /// index the full grid (scrollback + visible); visible view row r shows grid
 /// line (total - offset + r).
-fn highlight_matches(frame: &mut Frame, pane: &Pane, rect: Rect) {
+fn highlight_matches(frame: &mut Frame, pane: &Pane, rect: Rect, borders: Borders) {
     let Some(s) = &pane.search else { return };
     let (total, offset, height) = match pane.parser.lock() {
         Ok(mut p) => {
@@ -179,6 +180,10 @@ fn highlight_matches(frame: &mut Frame, pane: &Pane, rect: Rect) {
         }
         Err(_) => return,
     };
+    // Dropped facing borders are content cells — only clamp off a side
+    // whose border line was actually drawn.
+    let right = rect.x + rect.width - u16::from(borders.contains(Borders::RIGHT));
+    let bottom = rect.y + rect.height - u16::from(borders.contains(Borders::BOTTOM));
     for m in &s.matches {
         let view_row = m.row as i64 - (total as i64 - offset as i64);
         if view_row < 0 || view_row >= height as i64 {
@@ -187,18 +192,16 @@ fn highlight_matches(frame: &mut Frame, pane: &Pane, rect: Rect) {
         let y = rect.y + 1 + view_row as u16; // +1 for the border
         for dx in 0..m.len {
             let x = rect.x + 1 + (m.col + dx) as u16;
-            // A match near a row's right edge can overshoot — clamp inside
-            // the block's borders.
-            if x < rect.x + rect.width - 1 && y < rect.y + rect.height - 1 {
+            if x < right && y < bottom {
                 frame.buffer_mut()[(x, y)].modifier |= Modifier::REVERSED;
             }
         }
     }
 }
 
-fn sync_pane_size(pane: &Pane, rect: Rect) {
-    let rows = rect.height.saturating_sub(2).max(1);
-    let cols = rect.width.saturating_sub(2).max(1);
+fn sync_pane_size(pane: &Pane, inner: Rect) {
+    let rows = inner.height.max(1);
+    let cols = inner.width.max(1);
     // Discarding the error is intentional: a resize failure here just means
     // the pane keeps its previous size for this one frame. It isn't a
     // permanent loss — the next frame calls resize() again with the current
@@ -371,6 +374,7 @@ mod tests {
     use crate::project::Project;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     use ratatui::Terminal;
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -395,6 +399,36 @@ mod tests {
             }
         }
         false
+    }
+
+    #[test]
+    fn three_panes_share_border_lines_no_dead_gap() {
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        for _ in 0..3 {
+            app.spawn_pane(None);
+        }
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // Pane-grid area: right of the 24-col sidebar, above the status bar.
+        let grid = Rect::new(24, 0, 56, 23);
+        for y in grid.y..grid.y + grid.height {
+            assert!(
+                (grid.x..grid.x + grid.width).any(|x| buffer[(x, y)].symbol() != " "),
+                "row {y} is blank — a dead gap row leaked into the grid"
+            );
+        }
+        for x in grid.x..grid.x + grid.width {
+            assert!(
+                (grid.y..grid.y + grid.height).any(|y| buffer[(x, y)].symbol() != " "),
+                "col {x} is blank — a dead gap column leaked into the grid"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::Borders;
 
-const GUTTER: u16 = 1;
+/// Panes abut — neighbors share a single border line (see pane_borders).
+const GUTTER: u16 = 0;
 
 /// (sidebar, pane-grid, status-bar) regions of a frame. Rendering and
 /// mouse hit-testing share this so they always agree on pane positions.
@@ -75,6 +77,28 @@ fn split_rows(area: Rect, row_split: f32) -> Vec<Rect> {
     vec![parts[0], parts[2]]
 }
 
+/// Which borders a pane should draw. Neighbors share a single divider:
+/// a pane drops RIGHT when another rect abuts its right edge and BOTTOM
+/// when one abuts its bottom edge — the right/bottom neighbor's own
+/// LEFT/TOP border serves as the divider line. LEFT and TOP are always
+/// drawn (outer frame edges or the pane's own divider duty).
+pub fn pane_borders(rects: &[Rect], r: Rect) -> Borders {
+    let mut b = Borders::ALL;
+    let right_abuts = |o: &Rect| {
+        o.x == r.x + r.width && o.y < r.y + r.height && o.y + o.height > r.y
+    };
+    let bottom_abuts = |o: &Rect| {
+        o.y == r.y + r.height && o.x < r.x + r.width && o.x + o.width > r.x
+    };
+    if rects.iter().any(right_abuts) {
+        b.remove(Borders::RIGHT);
+    }
+    if rects.iter().any(bottom_abuts) {
+        b.remove(Borders::BOTTOM);
+    }
+    b
+}
+
 fn wrapping_grid(area: Rect, count: usize) -> Vec<Rect> {
     let cols = 3usize;
     let rows = count.div_ceil(cols);
@@ -124,19 +148,38 @@ mod tests {
     }
 
     #[test]
-    fn two_panes_split_by_col_split_with_gutter() {
+    fn two_panes_split_by_col_split_abutting() {
         let rects = pane_rects(area(), 2, 0.5, 0.5);
         assert_eq!(rects.len(), 2);
         // Left pane starts at the area's left edge.
         assert_eq!(rects[0].x, 0);
         // Right pane ends at the area's right edge.
         assert_eq!(rects[1].x + rects[1].width, 100);
-        // A 1-cell gutter separates them: right pane starts strictly after
-        // the left pane ends.
-        assert!(rects[1].x > rects[0].x + rects[0].width);
+        // No gutter: the right pane starts where the left pane ends —
+        // the shared border line is the divider.
+        assert_eq!(rects[1].x, rects[0].x + rects[0].width);
         // Both panes span the full height.
         assert_eq!(rects[0].height, 40);
         assert_eq!(rects[1].height, 40);
+    }
+
+    #[test]
+    fn pane_borders_drop_facing_sides_so_neighbors_share_one_line() {
+        let rects = pane_rects(area(), 4, 0.5, 0.5);
+        // Top-left abuts right and bottom neighbors — keeps LEFT+TOP.
+        assert_eq!(pane_borders(&rects, rects[0]), Borders::LEFT | Borders::TOP);
+        // Top-right only abuts below.
+        assert_eq!(
+            pane_borders(&rects, rects[1]),
+            Borders::LEFT | Borders::TOP | Borders::RIGHT
+        );
+        // Bottom-left only abuts right.
+        assert_eq!(
+            pane_borders(&rects, rects[2]),
+            Borders::LEFT | Borders::TOP | Borders::BOTTOM
+        );
+        // Bottom-right owns all outer edges plus both divider lines.
+        assert_eq!(pane_borders(&rects, rects[3]), Borders::ALL);
     }
 
     #[test]
