@@ -2,6 +2,12 @@
 name = "rustterm"
 version = "0.1.0"
 edition = "2021"
+description = "A terminal workspace for humans and AI agents — multi-project TUI multiplexer with PTY panes, popups, git tooling, and mouse support"
+license = "MIT"
+repository = "https://github.com/mahadi-jsdev/rustterm"
+homepage = "https://github.com/mahadi-jsdev/rustterm"
+keywords = ["terminal", "multiplexer", "tui", "pty", "git"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 ratatui = "0.30"
