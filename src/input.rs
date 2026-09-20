@@ -3,7 +3,7 @@ use crate::keys::key_event_to_bytes;
 use crate::notify;
 use crate::palette::{self, Palette};
 use crate::text_input::{EditResult, LineEdit};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
 const SCROLL_LINES: usize = 3;
@@ -11,12 +11,17 @@ const SCROLL_LINES: usize = 3;
 /// Route a mouse event. Wheel events scroll the scrollback of the pane
 /// under the cursor — unless that pane's app enabled mouse reporting,
 /// in which case they're forwarded to the PTY in its requested encoding.
+/// Left-click focuses panes and drives the sidebar (select/activate).
 pub fn handle_mouse(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
-    let up = match mouse.kind {
-        MouseEventKind::ScrollUp => true,
-        MouseEventKind::ScrollDown => false,
-        _ => return,
-    };
+    match mouse.kind {
+        MouseEventKind::ScrollUp => wheel_scroll(app, mouse, frame_area, true),
+        MouseEventKind::ScrollDown => wheel_scroll(app, mouse, frame_area, false),
+        MouseEventKind::Down(MouseButton::Left) => click(app, mouse, frame_area),
+        _ => {}
+    }
+}
+
+fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
     let sidebar_visible = app.sidebar_visible;
     let Some(project) = app.active_project_mut() else {
         return;
@@ -53,6 +58,82 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
         pane.scroll_up(SCROLL_LINES);
     } else {
         pane.scroll_down(SCROLL_LINES);
+    }
+}
+
+/// Left-click: a pane focuses it (and exits Sidebar/Leader back to
+/// Normal); the sidebar drives selection/activation. Modal overlays
+/// (palette/finder/line input) swallow clicks — Esc dismisses those.
+fn click(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
+    if matches!(
+        app.mode,
+        InputMode::Palette | InputMode::Finder | InputMode::LineInput(_)
+    ) {
+        return;
+    }
+    let pos = Position::new(mouse.column, mouse.row);
+    let (sidebar, main, _) = crate::layout::frame_areas(frame_area, app.sidebar_visible);
+    if app.sidebar_visible && sidebar.contains(pos) {
+        click_sidebar(app, pos, sidebar);
+        return;
+    }
+    if !main.contains(pos) {
+        return;
+    }
+    let Some(project) = app.active_project_mut() else {
+        return;
+    };
+    let visible: Vec<usize> = project
+        .panes
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.hidden)
+        .map(|(i, _)| i)
+        .collect();
+    let rects =
+        crate::layout::pane_rects(main, visible.len(), project.col_split, project.row_split);
+    if let Some((vi, _)) = rects.iter().enumerate().find(|(_, r)| r.contains(pos)) {
+        project.active_pane = visible[vi];
+    }
+    app.mode = InputMode::Normal;
+}
+
+/// Click inside the sidebar: the "Projects" title row collapses the
+/// panel, project rows switch projects, the git block's title row
+/// toggles files↔branches, and git rows select — a click on the
+/// already-selected row activates it (same as Enter).
+fn click_sidebar(app: &mut App, pos: Position, sidebar: Rect) {
+    if pos.y == sidebar.y {
+        app.toggle_sidebar();
+        return;
+    }
+    let project_h = (app.projects.len() as u16 + 2).min(10).min(sidebar.height);
+    let git_top = sidebar.y + project_h;
+    if pos.y < git_top {
+        let row = pos.y - sidebar.y - 1;
+        if (row as usize) < app.projects.len() {
+            app.set_active_project(row as usize);
+        }
+        app.enter_sidebar();
+        return;
+    }
+    if pos.y == git_top {
+        app.enter_sidebar();
+        app.sidebar_toggle_branches();
+        return;
+    }
+    let row = (pos.y - git_top - 1) as usize;
+    if row < app.sidebar_items_len() {
+        if matches!(app.mode, InputMode::Sidebar) && app.sidebar_sel == row {
+            app.sidebar_activate();
+        } else {
+            if !matches!(app.mode, InputMode::Sidebar) {
+                app.enter_sidebar();
+            }
+            app.sidebar_sel = row;
+        }
+    } else {
+        app.enter_sidebar();
     }
 }
 
@@ -206,29 +287,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Up => app.sidebar_move(-1),
                 KeyCode::Char('b') if key.modifiers.is_empty() => app.sidebar_toggle_branches(),
                 KeyCode::Char('c') if key.modifiers.is_empty() => app.start_ai_commit(),
-                KeyCode::Enter => {
-                    if app.sidebar_branches {
-                        if let (Some(root), Some(branch)) =
-                            (app.active_root(), app.sidebar_selected_branch())
-                        {
-                            match crate::git::switch(&root, &branch) {
-                                Ok(()) => {
-                                    app.git_status = crate::git::status(&root);
-                                    app.flash(format!("switched to {branch}"));
-                                }
-                                Err(e) => app.flash(format!("git switch: {e}")),
-                            }
-                        }
-                    } else if let Some(file) = app.sidebar_selected_file() {
-                        // `diff HEAD` covers staged AND unstaged changes —
-                        // plain `diff` leaves staged edits invisible.
-                        let cmd = format!(
-                            "git --no-pager diff HEAD --color=always -- {}",
-                            crate::app::shell_quote(&file)
-                        );
-                        app.spawn_pane(Some(&cmd));
-                    }
-                }
+                KeyCode::Enter => app.sidebar_activate(),
                 _ => {}
             }
         }
@@ -671,6 +730,118 @@ mod tests {
             .screen()
             .scrollback();
         assert_eq!(s, SCROLL_LINES);
+    }
+
+    fn frame80() -> Rect {
+        Rect::new(0, 0, 80, 24)
+    }
+
+    fn click_at(column: u16, row: u16) -> MouseEvent {
+        mouse(MouseEventKind::Down(MouseButton::Left), column, row)
+    }
+
+    /// Temp git repo with one modified file — enter_sidebar()'s real
+    /// `git status` call must find something to list.
+    fn git_repo(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("rustterm-click-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(root.join("a.txt"), b"one").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-m", "init"]);
+        std::fs::write(root.join("a.txt"), b"two").unwrap();
+        root
+    }
+
+    #[test]
+    fn click_pane_focuses_it_and_exits_sidebar_mode() {
+        let mut app = app_with_one_project();
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        // Two panes split the main area (x24..80): left ~24..51, right ~52..80.
+        handle_mouse(&mut app, click_at(70, 10), frame80());
+        assert_eq!(app.active_project().unwrap().active_pane, 1);
+
+        app.enter_sidebar();
+        handle_mouse(&mut app, click_at(30, 10), frame80());
+        assert_eq!(app.active_project().unwrap().active_pane, 0);
+        assert!(matches!(app.mode, InputMode::Normal));
+    }
+
+    #[test]
+    fn click_project_row_switches_project_and_focuses_sidebar() {
+        let mut app = app_with_one_project();
+        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        // Project rows live at sidebar.y+1 — row 1 is the second project.
+        handle_mouse(&mut app, click_at(5, 2), frame80());
+        assert_eq!(app.active_project, 1);
+        assert!(matches!(app.mode, InputMode::Sidebar));
+    }
+
+    #[test]
+    fn click_projects_title_row_collapses_sidebar() {
+        let mut app = app_with_one_project();
+        handle_mouse(&mut app, click_at(5, 0), frame80());
+        assert!(!app.sidebar_visible);
+    }
+
+    #[test]
+    fn click_git_title_row_toggles_branches() {
+        let mut app = app_with_one_project();
+        // project_h = 1 project + 2 borders = 3 → git title row is y3.
+        handle_mouse(&mut app, click_at(5, 3), frame80());
+        assert!(matches!(app.mode, InputMode::Sidebar));
+        assert!(app.sidebar_branches);
+    }
+
+    #[test]
+    fn click_git_row_selects_then_activates() {
+        let root = git_repo("row");
+        let (tx, _rx) = mpsc::channel();
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), root.clone()));
+        app.spawn_pane(None);
+
+        // Git rows start at y4 — first click selects (enters Sidebar).
+        handle_mouse(&mut app, click_at(5, 4), frame80());
+        assert!(matches!(app.mode, InputMode::Sidebar));
+        assert_eq!(app.sidebar_sel, 0);
+        assert_eq!(app.active_project().unwrap().panes.len(), 1);
+
+        // Clicking the selected row activates it — opens the diff pane.
+        handle_mouse(&mut app, click_at(5, 4), frame80());
+        let panes = &app.active_project().unwrap().panes;
+        assert_eq!(panes.len(), 2);
+        assert!(panes[1]
+            .startup_command
+            .as_deref()
+            .unwrap()
+            .contains("git --no-pager diff HEAD"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clicks_are_ignored_while_palette_is_open() {
+        let mut app = app_with_one_project();
+        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.palette = Some(crate::palette::Palette::open(&app));
+        app.mode = InputMode::Palette;
+        handle_mouse(&mut app, click_at(5, 2), frame80()); // project row
+        assert_eq!(app.active_project, 0);
+        assert!(matches!(app.mode, InputMode::Palette));
     }
 
     #[test]

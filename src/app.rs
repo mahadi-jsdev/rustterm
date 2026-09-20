@@ -492,6 +492,33 @@ impl App {
         self.sidebar_branch_list.get(self.sidebar_sel).cloned()
     }
 
+    /// Activate the selected sidebar row — branches `git switch`, files
+    /// open their `git diff HEAD` in a new pane. Shared by Enter in
+    /// Sidebar mode and click-on-selected-row in mouse handling.
+    pub fn sidebar_activate(&mut self) {
+        if self.sidebar_branches {
+            if let (Some(root), Some(branch)) =
+                (self.active_root(), self.sidebar_selected_branch())
+            {
+                match crate::git::switch(&root, &branch) {
+                    Ok(()) => {
+                        self.git_status = crate::git::status(&root);
+                        self.flash(format!("switched to {branch}"));
+                    }
+                    Err(e) => self.flash(format!("git switch: {e}")),
+                }
+            }
+        } else if let Some(file) = self.sidebar_selected_file() {
+            // `diff HEAD` covers staged AND unstaged changes —
+            // plain `diff` leaves staged edits invisible.
+            let cmd = format!(
+                "git --no-pager diff HEAD --color=always -- {}",
+                shell_quote(&file)
+            );
+            self.spawn_pane(Some(&cmd));
+        }
+    }
+
     pub fn open_finder(&mut self) {
         if let Some(root) = self.active_root() {
             self.finder = Some(crate::finder::FinderState::open(&root));
