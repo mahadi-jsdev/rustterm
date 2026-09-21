@@ -345,11 +345,14 @@ fn click_sidebar(app: &mut App, pos: Position, sidebar: Rect) {
         let row = pos.y - sidebar.y - 1;
         if (row as usize) < app.projects.len() {
             app.set_active_project(row as usize);
+            // Switching project by mouse keeps terminal focus — only
+            // claim the sidebar when it's already the active mode.
+            if matches!(app.mode, InputMode::Sidebar) {
+                app.sidebar_focus = crate::app::SidebarSection::Projects;
+            }
+        } else {
+            app.enter_sidebar();
         }
-        app.enter_sidebar();
-        // A project click focuses the Projects section — the git panel
-        // isn't what you clicked on.
-        app.sidebar_focus = crate::app::SidebarSection::Projects;
         return;
     }
     if pos.y == git_top {
@@ -1192,13 +1195,14 @@ mod tests {
     }
 
     #[test]
-    fn click_project_row_switches_project_and_focuses_sidebar() {
+    fn click_project_row_switches_project_and_keeps_normal() {
         let mut app = app_with_one_project();
         app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
         // Project rows live at sidebar.y+1 — row 1 is the second project.
         handle_mouse(&mut app, click_at(5, 2), frame80());
         assert_eq!(app.active_project, 1);
-        assert!(matches!(app.mode, InputMode::Sidebar));
+        assert!(matches!(app.mode, InputMode::Normal),
+            "mouse project-switch keeps terminal focus");
     }
 
     #[test]
@@ -1770,14 +1774,22 @@ mod tests {
     }
 
     #[test]
-    fn click_project_row_focuses_projects_section() {
+    fn click_project_row_switches_but_keeps_terminal_focus() {
         let mut app = app_with_one_project();
         app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
         handle_mouse(&mut app, click_at(5, 2), frame80());
         assert_eq!(app.active_project, 1);
+        assert!(matches!(app.mode, InputMode::Normal),
+            "project click must not steal focus from the terminal");
+
+        // Already navigating the sidebar → click stays in the flow and
+        // focuses Projects, not Git.
+        app.enter_sidebar();
+        app.sidebar_focus = crate::app::SidebarSection::Git;
+        handle_mouse(&mut app, click_at(5, 1), frame80());
+        assert_eq!(app.active_project, 0);
         assert!(matches!(app.mode, InputMode::Sidebar));
-        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Projects,
-            "clicking a project focuses Projects, not Git");
+        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Projects);
     }
 
     #[test]
