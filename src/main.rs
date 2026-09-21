@@ -74,9 +74,17 @@ fn main() -> anyhow::Result<()> {
     // file description — which fork() inherits intact into the keeper.
     let mut relay = rustterm::daemon::InputRelay::install().ok();
     let mut terminal = ratatui::init();
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste
+    );
     let result = rustterm::runloop::run(&mut terminal, &mut app, &events_rx, &app_rx, None);
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::DisableBracketedPaste,
+        crossterm::event::DisableMouseCapture
+    );
     ratatui::restore();
 
     if app.detach_requested {

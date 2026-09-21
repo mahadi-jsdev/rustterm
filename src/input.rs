@@ -773,6 +773,71 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Terminal paste (bracketed-paste `Event::Paste`). Text-entry modes take
+/// the text literally (newlines collapse to spaces inside `insert_str`);
+/// pane modes forward to the top float or active pane wrapped in
+/// `200~`/`201~` when the app opted in — so a multi-line paste lands as
+/// ONE paste instead of executing line-by-line. Leader/Copy swallow it.
+pub fn handle_paste(app: &mut App, text: String) {
+    match app.mode {
+        InputMode::LineInput(_) => {
+            if let Some(edit) = app.line_input.as_mut() {
+                edit.insert_str(&text);
+            }
+        }
+        InputMode::Palette => {
+            if let Some(pal) = app.palette.as_mut() {
+                let q = format!("{}{}", pal.query, text.replace(['\r', '\n'], " "));
+                pal.set_query(q);
+            }
+        }
+        InputMode::Finder => {
+            if let Some(f) = app.finder.as_mut() {
+                let q = format!("{}{}", f.query, text.replace(['\r', '\n'], " "));
+                f.set_query(q);
+            }
+        }
+        InputMode::Normal | InputMode::Sidebar | InputMode::Search => {
+            let mut pending = Vec::new();
+            if let Some(project) = app.active_project_mut() {
+                let pane = if project.top_float().is_some() {
+                    project.top_float_mut()
+                } else {
+                    project.active_pane_mut()
+                };
+                if let Some(pane) = pane {
+                    // The watcher sees raw text — the 200~/201~ wrap is
+                    // transport framing, not input.
+                    for e in pane.watcher.on_input(text.as_bytes()) {
+                        pending.push((pane.id, e));
+                    }
+                    pane.scroll_to_bottom();
+                    let _ = pane.write_input(&paste_bytes(pane, &text));
+                }
+            }
+            for (id, e) in pending {
+                notify::dispatch(app, id, e);
+            }
+        }
+        InputMode::Leader | InputMode::Copy => {}
+    }
+}
+
+/// Wraps `text` in bracketed-paste markers when the pane's app enabled
+/// DECSET 2004; a literal `200~`/`201~` inside the content is stripped so
+/// it can't break out of (or nest) the frame.
+fn paste_bytes(pane: &crate::pane::Pane, text: &str) -> Vec<u8> {
+    if !pane.bracketed_paste() {
+        return text.as_bytes().to_vec();
+    }
+    let safe = text.replace("\x1b[201~", "").replace("\x1b[200~", "");
+    let mut v = Vec::with_capacity(safe.len() + 12);
+    v.extend_from_slice(b"\x1b[200~");
+    v.extend_from_slice(safe.as_bytes());
+    v.extend_from_slice(b"\x1b[201~");
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1805,5 +1870,123 @@ mod tests {
         let copy = app.copy.as_ref().unwrap();
         assert_eq!(copy.anchor, Some((0, 5)), "first drag anchors at pre-drag cursor");
         assert_eq!(copy.cursor, (0, 9));
+    }
+
+    fn pane_screen_contains(pane: &crate::pane::Pane, needle: &str, wait_ms: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        while std::time::Instant::now() < deadline {
+            if pane.parser.lock().unwrap().screen().contents().contains(needle) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// Unlike `app_with_one_project`, keeps the event receivers alive —
+    /// spawn_reader exits on a failed send, so a dropped receiver leaves
+    /// the pane's parser frozen after the first output chunk.
+    fn app_with_live_events() -> (App, mpsc::Receiver<crate::pane::PaneEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        (app, rx)
+    }
+
+    /// Blocks until the pane's shell is reading input — fish can take a
+    /// while to init under test load, and writes queued before it starts
+    /// are fine but slow to echo.
+    fn wait_pane_ready(pane: &crate::pane::Pane) {
+        let _ = pane.write_input(b"echo RDY-MARK\n");
+        assert!(
+            pane_screen_contains(pane, "RDY-MARK", 4000),
+            "pane never became ready"
+        );
+    }
+
+    #[test]
+    fn paste_bytes_wraps_only_when_pane_enabled_bracketed() {
+        let (tx, _rx) = mpsc::channel();
+        let pane =
+            crate::pane::Pane::spawn(1, "t".into(), 24, 80, None, tx, None, 10_000).unwrap();
+        // DECSET 2004 off by default → raw passthrough.
+        assert_eq!(paste_bytes(&pane, "a\nb"), b"a\nb");
+        pane.parser.lock().unwrap().process(b"\x1b[?2004h");
+        assert_eq!(paste_bytes(&pane, "a\nb"), b"\x1b[200~a\nb\x1b[201~");
+        // A literal terminator in the clipboard can't break the frame.
+        assert_eq!(paste_bytes(&pane, "x\x1b[201~y"), b"\x1b[200~xy\x1b[201~");
+        pane.parser.lock().unwrap().process(b"\x1b[?2004l");
+        assert_eq!(paste_bytes(&pane, "a\nb"), b"a\nb");
+    }
+
+    #[test]
+    fn paste_to_line_input_collapses_newlines() {
+        let mut app = app_with_one_project();
+        app.line_input = Some(LineEdit::new());
+        app.mode = InputMode::LineInput(LinePurpose::Search);
+        handle_paste(&mut app, "alpha\r\nbeta\ngamma".into());
+        assert_eq!(app.line_input.as_ref().unwrap().as_str(), "alpha beta gamma");
+    }
+
+    #[test]
+    fn paste_appends_to_palette_and_finder_queries() {
+        let mut app = app_with_one_project();
+        app.palette = Some(Palette::open(&app));
+        app.mode = InputMode::Palette;
+        handle_paste(&mut app, "qui\nt".into());
+        assert_eq!(app.palette.as_ref().unwrap().query, "qui t");
+        app.palette = None;
+
+        app.finder = Some(crate::finder::FinderState::open(&app.active_root().unwrap()));
+        app.mode = InputMode::Finder;
+        handle_paste(&mut app, "src\nmain".into());
+        assert_eq!(app.finder.as_ref().unwrap().query, "src main");
+        app.finder = None;
+        app.mode = InputMode::Normal;
+    }
+
+    #[test]
+    fn paste_routes_to_active_pane_and_float_wins() {
+        let (mut app, _rx) = app_with_live_events();
+        // `cat` echoes input — a deterministic sink that can't "execute".
+        app.spawn_pane(Some("cat"));
+        let pane_id = app.active_project().unwrap().panes[0].id;
+        wait_pane_ready(&app.active_project().unwrap().panes[0]);
+        handle_paste(&mut app, "GRID-MARK".into());
+        let pane = &app.active_project().unwrap().panes[0];
+        assert!(
+            pane_screen_contains(pane, "GRID-MARK", 1500),
+            "paste should reach the active pane"
+        );
+
+        app.spawn_float("cat", "cat");
+        wait_pane_ready(app.active_project().unwrap().top_float().unwrap());
+        handle_paste(&mut app, "FLOAT-MARK".into());
+        let project = app.active_project().unwrap();
+        let float = project.top_float().unwrap();
+        assert!(
+            pane_screen_contains(float, "FLOAT-MARK", 1500),
+            "paste should reach the top float"
+        );
+        let grid = project.panes.iter().find(|p| p.id == pane_id).unwrap();
+        assert!(
+            !pane_screen_contains(grid, "FLOAT-MARK", 300),
+            "grid pane must not see the float's paste"
+        );
+    }
+
+    #[test]
+    fn paste_in_leader_or_copy_mode_is_swallowed() {
+        let (mut app, _rx) = app_with_live_events();
+        app.spawn_pane(Some("cat"));
+        wait_pane_ready(&app.active_project().unwrap().panes[0]);
+        app.mode = InputMode::Leader;
+        handle_paste(&mut app, "SWALLOW-L".into());
+        app.mode = InputMode::Copy;
+        handle_paste(&mut app, "SWALLOW-C".into());
+        let pane = &app.active_project().unwrap().panes[0];
+        assert!(!pane_screen_contains(pane, "SWALLOW-L", 300));
+        assert!(!pane_screen_contains(pane, "SWALLOW-C", 300));
     }
 }

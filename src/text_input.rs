@@ -32,6 +32,14 @@ impl LineEdit {
         self.buf = s;
     }
 
+    /// Appends pasted text; newlines collapse to spaces so a multi-line
+    /// clipboard can't smuggle a fake Enter into a one-line field.
+    pub fn insert_str(&mut self, s: &str) {
+        self.error = None;
+        self.buf
+            .push_str(&s.replace("\r\n", " ").replace(['\r', '\n'], " "));
+    }
+
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }

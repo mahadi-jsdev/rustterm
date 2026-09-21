@@ -97,6 +97,16 @@ impl Pane {
         Ok(())
     }
 
+    /// Whether the app running in this pane enabled bracketed-paste mode
+    /// (DECSET 2004). When true, pasted text must be wrapped in
+    /// `\x1b[200~` … `\x1b[201~` so shells treat newlines as text, not Enter.
+    pub fn bracketed_paste(&self) -> bool {
+        self.parser
+            .lock()
+            .map(|p| p.screen().bracketed_paste())
+            .unwrap_or(false)
+    }
+
     /// Scroll the view `n` rows up into scrollback history. vt100 clamps
     /// the offset to the available scrollback; 0 is the live view.
     pub fn scroll_up(&self, n: usize) {

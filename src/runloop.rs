@@ -31,6 +31,9 @@ pub fn run(
                         crate::input::handle_mouse(app, mouse, area);
                     }
                 }
+                crossterm::event::Event::Paste(text) => {
+                    crate::input::handle_paste(app, text);
+                }
                 _ => {}
             }
         }

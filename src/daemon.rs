@@ -419,12 +419,14 @@ fn attached_phase(
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste
     );
     let _ = crate::runloop::run(&mut terminal, app, events_rx, app_rx, Some(dead.clone()));
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableBracketedPaste,
         crossterm::event::DisableMouseCapture
     );
     let _ = std::io::stdout().flush();
@@ -491,6 +493,7 @@ fn client_cleanup() {
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen
     );
     let _ = crossterm::terminal::disable_raw_mode();

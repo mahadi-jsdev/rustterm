@@ -39,6 +39,9 @@ Ctrl+A for commands   ▸ running   ⬚1 popup
 - **Copy that just works** — `C-a v` enters a vim-style copy mode over
   the full scrollback, or just **drag with the mouse** — release copies
   to your clipboard via OSC52 (works over SSH, no X11 dependency).
+- **Safe multiline paste** — bracketed paste end-to-end: pasting into a
+  shell inserts the text as one buffer instead of executing each line.
+  Paste also lands in the palette, finder, and prompt fields.
 - **Full mouse support** — click to focus panes, click through the
   sidebar, drag-select to copy, wheel to scroll scrollback (events
   forward to apps that capture the mouse; `Shift`-drag always selects).
