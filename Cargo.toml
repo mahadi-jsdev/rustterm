@@ -1,6 +1,6 @@
 [package]
 name = "rustterm"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A terminal workspace for humans and AI agents — multi-project TUI multiplexer with PTY panes, popups, git tooling, and mouse support"
 license = "MIT"
