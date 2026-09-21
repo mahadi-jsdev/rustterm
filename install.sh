@@ -41,8 +41,15 @@ install_release() {
         return 1
     fi
     tar -xzf "$tmp/$BIN.tar.gz" -C "$tmp"
+    # Binary may sit at the tarball root or inside a target dir.
+    local bin
+    bin="$(find "$tmp" -name "$BIN" -type f | head -1)"
+    if [ -z "$bin" ]; then
+        rm -rf "$tmp"; trap - EXIT
+        return 1
+    fi
     mkdir -p "$PREFIX"
-    install -m 0755 "$tmp/$BIN" "$PREFIX/$BIN"
+    install -m 0755 "$bin" "$PREFIX/$BIN" || { rm -rf "$tmp"; trap - EXIT; return 1; }
     rm -rf "$tmp"; trap - EXIT
     say "installed $PREFIX/$BIN"
     case ":$PATH:" in
