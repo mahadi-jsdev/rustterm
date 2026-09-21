@@ -17,8 +17,21 @@ pub enum WatchEvent {
     Command(String),
 }
 
+/// Escape-sequence state for input scanning — without it, arrow keys
+/// (`ESC [ C`) and friends push their printable bytes into `input_buf`
+/// and leak into notification bodies ("n[C").
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum InputEsc {
+    None,
+    Esc,
+    Csi,
+    Osc,
+    Ss3,
+}
+
 pub struct Watcher {
     input_buf: Vec<u8>,
+    esc: InputEsc,
     last_command: String,
     output_tail: String,
     last_hash: u64,
@@ -32,6 +45,7 @@ impl Watcher {
     pub fn new() -> Watcher {
         Watcher {
             input_buf: Vec::new(),
+            esc: InputEsc::None,
             last_command: String::new(),
             output_tail: String::new(),
             last_hash: 0,
@@ -52,6 +66,57 @@ impl Watcher {
             events.push(WatchEvent::Waiting(false));
         }
         for &b in bytes {
+            match self.esc {
+                InputEsc::Csi => {
+                    // CSI = params (0x30-0x3f) + intermediates (0x20-0x2f)
+                    // + one final byte (0x40-0x7e).
+                    if (0x40..=0x7e).contains(&b) {
+                        self.esc = InputEsc::None;
+                    }
+                    continue;
+                }
+                InputEsc::Osc => {
+                    // OSC ends on BEL or ST (ESC \).
+                    self.esc = match b {
+                        0x07 => InputEsc::None,
+                        0x1b => InputEsc::Esc,
+                        _ => InputEsc::Osc,
+                    };
+                    continue;
+                }
+                InputEsc::Ss3 => {
+                    self.esc = InputEsc::None;
+                    continue;
+                }
+                InputEsc::Esc => {
+                    self.esc = InputEsc::None;
+                    match b {
+                        b'[' => {
+                            self.esc = InputEsc::Csi;
+                            continue;
+                        }
+                        b']' => {
+                            self.esc = InputEsc::Osc;
+                            continue;
+                        }
+                        b'O' => {
+                            self.esc = InputEsc::Ss3;
+                            continue;
+                        }
+                        0x1b => {
+                            self.esc = InputEsc::Esc;
+                            continue;
+                        }
+                        b'\\' => continue, // ST closing an OSC
+                        // Control keys after a bare ESC still act
+                        // (Esc-then-Enter must commit); Alt+printable
+                        // sequences are swallowed as non-text.
+                        b'\r' | 0x03 | 0x7f | 0x08 => {}
+                        _ => continue,
+                    }
+                }
+                InputEsc::None => {}
+            }
             match b {
                 b'\r' => {
                     let line = String::from_utf8_lossy(&self.input_buf).trim().to_string();
@@ -65,6 +130,10 @@ impl Watcher {
                     self.input_buf.pop();
                 }
                 0x03 => self.input_buf.clear(),
+                0x1b => self.esc = InputEsc::Esc,
+                // Pasted newlines arrive as \n — keep them as a space so a
+                // multiline paste reads as one command line, not "a\nb"→"ab".
+                b'\n' => self.input_buf.push(b' '),
                 b if b >= 0x20 => self.input_buf.push(b),
                 _ => {}
             }
@@ -221,6 +290,36 @@ mod tests {
         let mut w = Watcher::new();
         assert!(w.on_input(b"\r").is_empty());
         assert!(w.on_input(b"  \r").is_empty());
+    }
+
+    #[test]
+    fn escape_sequences_dont_pollute_the_command() {
+        let mut w = Watcher::new();
+        // Arrow keys mid-line: CSI \x1b[C (cursor keys) and SS3 \x1bOD.
+        w.on_input(b"git \x1b[D\x1b[Cstatus\x1bOD\r");
+        assert_eq!(w.last_command(), "git status");
+        // Alt+key (ESC + printable) is swallowed, not typed.
+        let mut w = Watcher::new();
+        w.on_input(b"make\x1bx\r");
+        assert_eq!(w.last_command(), "make");
+        // A stray bracketed-paste frame would be stripped too.
+        let mut w = Watcher::new();
+        w.on_input(b"\x1b[200~deploy prod\x1b[201~\r");
+        assert_eq!(w.last_command(), "deploy prod");
+    }
+
+    #[test]
+    fn esc_then_enter_still_commits() {
+        let mut w = Watcher::new();
+        w.on_input(b"build\x1b\r");
+        assert_eq!(w.last_command(), "build");
+    }
+
+    #[test]
+    fn pasted_newlines_merge_as_spaces() {
+        let mut w = Watcher::new();
+        w.on_input(b"echo one\necho two\r");
+        assert_eq!(w.last_command(), "echo one echo two");
     }
 
     #[test]
