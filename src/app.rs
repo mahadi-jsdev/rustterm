@@ -9,10 +9,19 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 /// Which sidebar section owns keyboard focus in Sidebar mode —
-/// Projects (the picker) or Git (file/branch ops). Tab flips it.
+/// Projects (the picker) or the bottom Panel (files/git ops).
+/// Tab flips it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SidebarSection {
     Projects,
+    Panel,
+}
+
+/// What the sidebar's bottom Panel shows — the file manager is the
+/// default; `leader g`/`e` flip views (and focus the panel).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PanelView {
+    Files,
     Git,
 }
 
@@ -59,8 +68,12 @@ pub struct App {
     pub app_tx: mpsc::Sender<AppEvent>,
     pub sidebar_sel: usize,
     pub sidebar_branches: bool,
-    /// Focused sidebar section — `enter_sidebar` (leader g) lands on
-    /// Git; clicking a project row focuses Projects.
+    /// Which content the bottom sidebar panel shows (default Files).
+    pub panel_view: PanelView,
+    /// Lazy file tree for the Files view — rebuilt per project root.
+    pub files: Option<crate::files::FileTree>,
+    /// Focused sidebar section — `enter_sidebar` (leader g/e) lands on
+    /// Panel; clicking a project row focuses Projects.
     pub sidebar_focus: SidebarSection,
     /// Cached branch list — populated on enter_sidebar/toggle so the
     /// renderer and len helpers never shell out to git per frame.
@@ -128,7 +141,9 @@ impl App {
             last_watch_poll: Instant::now(),
             app_tx,
             sidebar_sel: 0,
-            sidebar_focus: SidebarSection::Git,
+            panel_view: PanelView::Files,
+            files: None,
+            sidebar_focus: SidebarSection::Panel,
             sidebar_branches: false,
             sidebar_branch_list: vec![],
             git_status: None,
@@ -221,9 +236,7 @@ impl App {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "project".to_string());
         self.projects.push(Project::new(name, root));
-        self.active_project = self.projects.len() - 1;
-        self.ensure_active_pane();
-        self.clear_git_cache();
+        self.set_active_project(self.projects.len() - 1);
     }
 
     pub fn set_active_project(&mut self, idx: usize) {
@@ -231,6 +244,16 @@ impl App {
             self.active_project = idx;
             self.ensure_active_pane();
             self.clear_git_cache();
+            // The file tree is rooted at the project — rebuild on switch.
+            self.files = self.active_root().map(crate::files::FileTree::new);
+        }
+    }
+
+    /// Builds the sidebar file tree for the active root if needed —
+    /// lazy so a sidebar that never opens never pays for it.
+    pub fn ensure_files(&mut self) {
+        if self.files.is_none() {
+            self.files = self.active_root().map(crate::files::FileTree::new);
         }
     }
 
@@ -420,6 +443,7 @@ impl App {
             self.active_project = s.active_project.min(self.projects.len() - 1);
             self.sidebar_visible = s.sidebar_visible;
             self.ensure_active_pane();
+            self.ensure_files();
         }
     }
 
@@ -542,24 +566,29 @@ impl App {
 
     pub fn enter_sidebar(&mut self) {
         self.sidebar_visible = true; // focusing un-hides the panel
-        if let Some(root) = self.active_root() {
-            self.git_status = crate::git::status(&root); // instant refresh
-            self.sidebar_branch_list = crate::git::branches(&root);
+        match self.panel_view {
+            PanelView::Git => {
+                if let Some(root) = self.active_root() {
+                    self.git_status = crate::git::status(&root); // instant refresh
+                    self.sidebar_branch_list = crate::git::branches(&root);
+                }
+            }
+            PanelView::Files => self.ensure_files(),
         }
         self.sidebar_sel = 0;
         self.sidebar_branches = false;
-        // `leader g` / programmatic entry lands on Git — that's where
-        // the actions live; clicking a project row overrides to
-        // Projects after calling this.
-        self.sidebar_focus = SidebarSection::Git;
+        // `leader g`/`e` land on the bottom panel — that's where the
+        // actions live; clicking a project row overrides to Projects.
+        self.sidebar_focus = SidebarSection::Panel;
         self.mode = InputMode::Sidebar;
     }
 
-    /// Tab — flip keyboard focus between the Projects and Git sections.
+    /// Tab — flip keyboard focus between the Projects section and the
+    /// bottom panel.
     pub fn sidebar_toggle_focus(&mut self) {
         self.sidebar_focus = match self.sidebar_focus {
-            SidebarSection::Projects => SidebarSection::Git,
-            SidebarSection::Git => SidebarSection::Projects,
+            SidebarSection::Projects => SidebarSection::Panel,
+            SidebarSection::Panel => SidebarSection::Projects,
         };
     }
 
@@ -596,12 +625,18 @@ impl App {
         }
     }
 
-    /// Rows in the active sidebar list (files or branches).
+    /// Rows in the active sidebar list — file tree, git files, or
+    /// branches, depending on the panel view.
     pub fn sidebar_items_len(&self) -> usize {
-        if self.sidebar_branches {
-            self.sidebar_branch_list.len()
-        } else {
-            self.git_status.as_ref().map(|s| s.files.len()).unwrap_or(0)
+        match self.panel_view {
+            PanelView::Files => self.files.as_ref().map(|t| t.rows.len()).unwrap_or(0),
+            PanelView::Git => {
+                if self.sidebar_branches {
+                    self.sidebar_branch_list.len()
+                } else {
+                    self.git_status.as_ref().map(|s| s.files.len()).unwrap_or(0)
+                }
+            }
         }
     }
 
@@ -631,7 +666,7 @@ impl App {
     /// Sidebar space: stage a file with unstaged work, unstage a fully
     /// staged one. Refresh the cached status so the row re-renders.
     pub fn sidebar_toggle_stage(&mut self) {
-        if self.sidebar_branches {
+        if self.panel_view != PanelView::Git || self.sidebar_branches {
             return;
         }
         let Some(root) = self.active_root() else {
@@ -893,10 +928,21 @@ impl App {
         }
     }
 
-    /// Activate the selected sidebar row — branches `git switch`, files
-    /// open their `git diff HEAD` in a popup float. Shared by Enter in
-    /// Sidebar mode and click-on-selected-row in mouse handling.
+    /// Activate the selected sidebar row — Files view opens files in an
+    /// editor float and folds dirs; Git view switches branches or opens
+    /// a `git diff HEAD` float. Shared by Enter and click-on-selected.
     pub fn sidebar_activate(&mut self) {
+        if self.panel_view == PanelView::Files {
+            self.ensure_files();
+            if let Some(path) = self
+                .files
+                .as_mut()
+                .and_then(|t| t.activate(self.sidebar_sel))
+            {
+                self.open_file_float(&path);
+            }
+            return;
+        }
         if self.sidebar_branches {
             if let (Some(root), Some(branch)) =
                 (self.active_root(), self.sidebar_selected_branch())
@@ -927,6 +973,46 @@ impl App {
         if let Some(root) = self.active_root() {
             self.finder = Some(crate::finder::FinderState::open(&root));
             self.mode = InputMode::Finder;
+        }
+    }
+
+    /// Open a file in a centered editor float — config.editor → $VISUAL
+    /// → $EDITOR → nvim. `exec`d so quitting the editor pops the float.
+    /// Shared by the finder and the sidebar file manager.
+    pub fn open_file_float(&mut self, path: &std::path::Path) {
+        let editor = self
+            .config
+            .editor
+            .clone()
+            .or_else(|| std::env::var("VISUAL").ok().filter(|s| !s.is_empty()))
+            .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "nvim".to_string());
+        let cmd = format!(
+            "exec {} {}",
+            editor,
+            shell_quote(&path.to_string_lossy())
+        );
+        let title = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| editor.clone());
+        self.spawn_float(&title, &cmd);
+        self.mode = InputMode::Normal;
+    }
+
+    /// Files view h/← — collapse the dir or jump selection to its parent.
+    pub fn files_collapse_or_parent(&mut self) {
+        self.ensure_files();
+        if let Some(t) = self.files.as_mut() {
+            self.sidebar_sel = t.collapse_or_parent(self.sidebar_sel);
+        }
+    }
+
+    /// Files view l/→ — expand a collapsed dir under the selection.
+    pub fn files_expand(&mut self) {
+        self.ensure_files();
+        if let Some(t) = self.files.as_mut() {
+            t.expand(self.sidebar_sel);
         }
     }
 
@@ -1245,6 +1331,7 @@ mod tests {
     #[test]
     fn sidebar_items_len_follows_files_or_branches() {
         let mut app = app_with_one_project();
+        app.panel_view = PanelView::Git;
         app.git_status = Some(crate::git::GitStatus {
             branch: "main".into(),
             files: vec![
@@ -1274,6 +1361,7 @@ mod tests {
     #[test]
     fn sidebar_file_activates_into_a_diff_float() {
         let mut app = app_with_one_project();
+        app.panel_view = PanelView::Git;
         app.git_status = Some(crate::git::GitStatus {
             branch: "m".into(),
             files: vec![crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "src/a.rs".into() }],

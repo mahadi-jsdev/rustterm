@@ -356,14 +356,18 @@ fn click_sidebar(app: &mut App, pos: Position, sidebar: Rect) {
         return;
     }
     if pos.y == git_top {
+        // Panel title row — clicking flips Files ↔ Git.
+        app.panel_view = match app.panel_view {
+            crate::app::PanelView::Files => crate::app::PanelView::Git,
+            crate::app::PanelView::Git => crate::app::PanelView::Files,
+        };
         app.enter_sidebar();
-        app.sidebar_toggle_branches();
         return;
     }
     let row = (pos.y - git_top - 1) as usize;
     if row < app.sidebar_items_len() {
         if matches!(app.mode, InputMode::Sidebar)
-            && app.sidebar_focus == crate::app::SidebarSection::Git
+            && app.sidebar_focus == crate::app::SidebarSection::Panel
             && app.sidebar_sel == row
         {
             app.sidebar_activate();
@@ -371,7 +375,7 @@ fn click_sidebar(app: &mut App, pos: Position, sidebar: Rect) {
             if !matches!(app.mode, InputMode::Sidebar) {
                 app.enter_sidebar();
             }
-            app.sidebar_focus = crate::app::SidebarSection::Git;
+            app.sidebar_focus = crate::app::SidebarSection::Panel;
             app.sidebar_sel = row;
         }
     } else {
@@ -471,7 +475,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     app.mode = InputMode::LineInput(LinePurpose::AddProject);
                 }
                 KeyCode::Char('b') => app.toggle_sidebar(),
-                KeyCode::Char('g') => app.enter_sidebar(),
+                KeyCode::Char('g') => {
+                    app.panel_view = crate::app::PanelView::Git;
+                    app.enter_sidebar();
+                }
+                KeyCode::Char('e') => {
+                    app.panel_view = crate::app::PanelView::Files;
+                    app.enter_sidebar();
+                }
                 // exec'd: `q` in lazygit exits the shell → popup auto-closes.
                 KeyCode::Char('G') => app.spawn_float("lazygit", "exec lazygit"),
                 KeyCode::Char('L') => app.open_git_log(),
@@ -578,25 +589,40 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     }
                     _ => {}
                 },
-                crate::app::SidebarSection::Git => match key.code {
+                crate::app::SidebarSection::Panel => match key.code {
                     KeyCode::Esc => {
                         app.mode = InputMode::Normal;
                     }
                     // Plain-char bindings require NO modifiers — otherwise
                     // e.g. Ctrl+C would run `git add -A` via the 'c' binding.
                     // (The leader is intercepted above and can't reach here.)
-                    KeyCode::Char('h') | KeyCode::Char('g') if key.modifiers.is_empty() => {
+                    KeyCode::Char('g') if key.modifiers.is_empty() => {
                         app.mode = InputMode::Normal;
                     }
                     KeyCode::Char('j') if key.modifiers.is_empty() => app.sidebar_move(1),
                     KeyCode::Down => app.sidebar_move(1),
                     KeyCode::Char('k') if key.modifiers.is_empty() => app.sidebar_move(-1),
                     KeyCode::Up => app.sidebar_move(-1),
-                    KeyCode::Char('b') if key.modifiers.is_empty() => app.sidebar_toggle_branches(),
-                    KeyCode::Char('c') if key.modifiers.is_empty() => app.start_ai_commit(),
-                    KeyCode::Char(' ') => app.sidebar_toggle_stage(),
                     KeyCode::Enter => app.sidebar_activate(),
-                    _ => {}
+                    _ if app.panel_view == crate::app::PanelView::Git => match key.code {
+                        KeyCode::Char('h') if key.modifiers.is_empty() => {
+                            app.mode = InputMode::Normal;
+                        }
+                        KeyCode::Char('b') if key.modifiers.is_empty() => {
+                            app.sidebar_toggle_branches()
+                        }
+                        KeyCode::Char('c') if key.modifiers.is_empty() => app.start_ai_commit(),
+                        KeyCode::Char(' ') => app.sidebar_toggle_stage(),
+                        _ => {}
+                    },
+                    // Files view — h folds/jumps up, l expands.
+                    _ => match key.code {
+                        KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
+                            app.files_collapse_or_parent()
+                        }
+                        KeyCode::Char('l') | KeyCode::Right => app.files_expand(),
+                        _ => {}
+                    },
                 },
             }
         }
@@ -612,28 +638,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 }
                 KeyCode::Enter => {
                     if let Some(path) = f.selected_path() {
-                        // config.editor → $VISUAL → $EDITOR → nvim.
-                        let editor = app
-                            .config
-                            .editor
-                            .clone()
-                            .or_else(|| {
-                                std::env::var("VISUAL").ok().filter(|s| !s.is_empty())
-                            })
-                            .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
-                            .unwrap_or_else(|| "nvim".to_string());
-                        let cmd = format!(
-                            "exec {} {}",
-                            editor,
-                            crate::app::shell_quote(&path.to_string_lossy())
-                        );
-                        let title = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| editor.clone());
                         app.finder = None;
-                        app.mode = InputMode::Normal;
-                        app.spawn_float(&title, &cmd);
+                        app.open_file_float(&path);
                     }
                 }
                 KeyCode::Up => f.move_prev(),
@@ -1213,12 +1219,14 @@ mod tests {
     }
 
     #[test]
-    fn click_git_title_row_toggles_branches() {
+    fn click_panel_title_row_toggles_view() {
         let mut app = app_with_one_project();
-        // project_h = 1 project + 2 borders = 3 → git title row is y3.
+        // project_h = 1 project + 2 borders = 3 → panel title row is y3.
         handle_mouse(&mut app, click_at(5, 3), frame80());
         assert!(matches!(app.mode, InputMode::Sidebar));
-        assert!(app.sidebar_branches);
+        assert_eq!(app.panel_view, crate::app::PanelView::Git);
+        handle_mouse(&mut app, click_at(5, 3), frame80());
+        assert_eq!(app.panel_view, crate::app::PanelView::Files);
     }
 
     #[test]
@@ -1228,6 +1236,7 @@ mod tests {
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), root.clone()));
+        app.panel_view = crate::app::PanelView::Git;
         app.spawn_pane(None);
 
         // Git rows start at y4 — first click selects (enters Sidebar).
@@ -1467,6 +1476,7 @@ mod tests {
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), root.clone()));
+        app.panel_view = crate::app::PanelView::Git;
         app.enter_sidebar(); // real git status — one modified file
         assert_eq!(app.sidebar_items_len(), 1);
 
@@ -1785,7 +1795,7 @@ mod tests {
         // Already navigating the sidebar → click stays in the flow and
         // focuses Projects, not Git.
         app.enter_sidebar();
-        app.sidebar_focus = crate::app::SidebarSection::Git;
+        app.sidebar_focus = crate::app::SidebarSection::Panel;
         handle_mouse(&mut app, click_at(5, 1), frame80());
         assert_eq!(app.active_project, 0);
         assert!(matches!(app.mode, InputMode::Sidebar));
@@ -1819,7 +1829,7 @@ mod tests {
         let mut app = app_with_one_project();
         app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
         app.enter_sidebar();
-        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Git,
+        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Panel,
             "leader g enters at Git");
         handle_key(&mut app, key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Projects);
@@ -1828,7 +1838,7 @@ mod tests {
         assert_eq!(app.active_project, 1);
         assert_eq!(app.sidebar_sel, 0);
         handle_key(&mut app, key(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Git);
+        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Panel);
     }
 
     #[test]
@@ -1844,7 +1854,7 @@ mod tests {
         app.enter_sidebar();
         app.sidebar_focus = crate::app::SidebarSection::Projects;
         handle_mouse(&mut app, click_at(5, 5), frame80()); // first git row
-        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Git);
+        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Panel);
     }
 
     #[test]

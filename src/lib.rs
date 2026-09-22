@@ -5,6 +5,7 @@ pub mod config;
 pub mod daemon;
 pub mod git;
 pub mod search;
+pub mod files;
 pub mod finder;
 pub mod layout;
 pub mod notify;

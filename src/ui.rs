@@ -78,46 +78,84 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             .title("Projects"),
     );
     frame.render_widget(list, chunks[0]);
-    draw_git_section(frame, app, chunks[1]);
+    draw_panel(frame, app, chunks[1]);
 }
 
-fn draw_git_section(frame: &mut Frame, app: &App, area: Rect) {
+/// The sidebar's bottom panel — a file tree by default, or the git
+/// section when panel_view is Git (leader g/e flip it).
+fn draw_panel(frame: &mut Frame, app: &App, area: Rect) {
     let focused = matches!(app.mode, InputMode::Sidebar)
-        && app.sidebar_focus == crate::app::SidebarSection::Git;
+        && app.sidebar_focus == crate::app::SidebarSection::Panel;
     let border = if focused {
         Style::default().fg(app.config.accent)
     } else {
         Style::default()
     };
-    let title = app
-        .git_status
-        .as_ref()
-        .map(|s| format!("⎇ {}", s.branch))
-        .unwrap_or_else(|| "git".to_string());
-    let block = Block::default().borders(Borders::ALL).border_style(border).title(title);
 
-    let items: Vec<ListItem> = if app.sidebar_branches {
-        app.sidebar_branch_list
-            .iter()
-            .enumerate()
-            .map(|(i, b)| sidebar_row(b.clone(), i, app.sidebar_sel, focused))
-            .collect()
-    } else {
-        match app.git_status.as_ref() {
-            Some(s) => s
-                .files
-                .iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    // Staged rows show the letter green, unstaged dim —
-                    // space toggles between the two states.
-                    let mark = if f.staged_only() { "+" } else { " " };
-                    sidebar_row(format!("{}{} {}", mark, f.status, f.path), i, app.sidebar_sel, focused)
-                })
-                .collect(),
-            None => vec![ListItem::new("  no repo")],
+    let (title, items) = match app.panel_view {
+        crate::app::PanelView::Files => {
+            let items: Vec<ListItem> = match app.files.as_ref() {
+                Some(t) => t
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let indent = "  ".repeat(r.depth);
+                        let name = r
+                            .path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let text = if r.is_dir {
+                            format!("{}{} {}/", indent, if r.expanded { "▾" } else { "▸" }, name)
+                        } else {
+                            format!("{}  {}", indent, name)
+                        };
+                        sidebar_row(text, i, app.sidebar_sel, focused)
+                    })
+                    .collect(),
+                None => vec![ListItem::new("  empty")],
+            };
+            ("Files".to_string(), items)
+        }
+        crate::app::PanelView::Git => {
+            let title = app
+                .git_status
+                .as_ref()
+                .map(|s| format!("⎇ {}", s.branch))
+                .unwrap_or_else(|| "git".to_string());
+            let items: Vec<ListItem> = if app.sidebar_branches {
+                app.sidebar_branch_list
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| sidebar_row(b.clone(), i, app.sidebar_sel, focused))
+                    .collect()
+            } else {
+                match app.git_status.as_ref() {
+                    Some(s) => s
+                        .files
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| {
+                            // Staged rows show the letter green, unstaged
+                            // dim — space toggles between the two states.
+                            let mark = if f.staged_only() { "+" } else { " " };
+                            sidebar_row(
+                                format!("{}{} {}", mark, f.status, f.path),
+                                i,
+                                app.sidebar_sel,
+                                focused,
+                            )
+                        })
+                        .collect(),
+                    None => vec![ListItem::new("  no repo")],
+                }
+            };
+            (title, items)
         }
     };
+
+    let block = Block::default().borders(Borders::ALL).border_style(border).title(title);
     frame.render_widget(List::new(items).block(block), area);
 }
 
@@ -399,18 +437,23 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 )
             }
             InputMode::Leader => {
-                "n new  x close  h/l switch  z zoom  . flag  H hide  [ ] project  +/- split  :/p palette  c add  b side  g git  G lazygit  L log  f find  / search  d detach  q quit"
+                "n new  x close  h/l switch  z zoom  . flag  H hide  [ ] project  +/- split  :/p palette  c add  b side  g git  e files  G lazygit  L log  f find  / search  d detach  q quit"
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),
             InputMode::Sidebar => match app.sidebar_focus {
                 crate::app::SidebarSection::Projects => {
-                    "j/k switch  enter open  tab git  esc back".to_string()
+                    "j/k switch  enter open  tab panel  esc back".to_string()
                 }
-                crate::app::SidebarSection::Git => {
-                    "j/k move  enter open  space stage  b branches  c ai-commit  tab projects  esc back"
-                        .to_string()
-                }
+                crate::app::SidebarSection::Panel => match app.panel_view {
+                    crate::app::PanelView::Git => {
+                        "j/k move  enter open  space stage  b branches  c ai-commit  tab projects  esc back"
+                            .to_string()
+                    }
+                    crate::app::PanelView::Files => {
+                        "j/k move  h/l fold  enter open  tab projects  esc back".to_string()
+                    }
+                },
             },
             InputMode::Finder => "type to filter  ↑/↓ move  enter open  esc cancel".to_string(),
             InputMode::Copy => {
@@ -825,6 +868,7 @@ mod tests {
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.panel_view = crate::app::PanelView::Git;
         app.git_status = Some(crate::git::GitStatus {
             branch: "main".into(),
             files: vec![crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "src/app.rs".into() }],

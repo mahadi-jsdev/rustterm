@@ -33,9 +33,12 @@ Ctrl+A for commands   ▸ running   ⬚1 popup
   (claude amber, codex blue, devin coral, gemini teal…), plus `●` waiting /
   `!` attention badges and desktop notifications when an agent needs you.
   `C-a .` jumps straight to the next flagged pane.
-- **Git sidebar** — live status (staged vs. worktree), branch switching,
+- **File manager sidebar** — the lower panel is a lazy project file tree
+  by default; Enter opens files in an editor popup. `C-a g` swaps it to
+  the **Git view** — live status (staged vs. worktree), branch switching,
   `space` to stage/unstage, Enter for a diff popup, `c` for an
-  AI-written commit message (OpenAI, via `OPENAI_API_KEY`).
+  AI-written commit message (OpenAI, via `OPENAI_API_KEY`). `C-a e`
+  switches back.
 - **Copy that just works** — `C-a v` enters a vim-style copy mode over
   the full scrollback, or just **drag with the mouse** — release copies
   to your clipboard via OSC52 (works over SSH, no X11 dependency).
@@ -102,7 +105,8 @@ Everything hangs off the **leader key**, `Ctrl+A` by default.
 | `:` or `p` | Command palette |
 | `c` | Add project… |
 | `b` | Toggle sidebar |
-| `g` | Sidebar (Git focus) |
+| `e` | Sidebar → Files panel |
+| `g` | Sidebar → Git panel |
 | `G` | lazygit popup |
 | `L` | `git log --graph` popup |
 | `f` | File finder → editor popup |
@@ -113,10 +117,16 @@ Everything hangs off the **leader key**, `Ctrl+A` by default.
 
 ### Sidebar
 
-Two sections, one focus at a time — `Tab` flips between them.
+Two sections, one focus at a time — `Tab` flips between them. The lower
+panel shows the **file manager** by default; `C-a e` and `C-a g` switch it
+between Files and Git (and focus it). Clicking the panel title row toggles
+the view too.
 
 - **Projects**: `j`/`k` switches projects live, `Enter` opens, `Esc` back.
   Clicking a project row focuses this section (and switches).
+- **Files**: lazy directory tree, dirs first — `j`/`k` moves, `l`/`→`
+  expands, `h`/`←`/`Backspace` collapses or hops to the parent, `Enter`
+  toggles a dir or opens a file in an editor popup. `.git` is hidden.
 - **Git**: `j`/`k` moves, `Enter` opens a diff popup (files) or
   `git switch` (branches — `b` toggles the list), `space` stages/unstages,
   `c` generates an AI commit message and prefills the commit prompt.

@@ -52,6 +52,7 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| "project".to_string());
         app.projects.push(Project::new(name, root.clone()));
     }
+    app.ensure_files();
 
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     // Only the first project gets an initial pane; others spawn on activation.
