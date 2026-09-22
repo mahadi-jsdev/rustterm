@@ -155,7 +155,25 @@ fn draw_panel(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let block = Block::default().borders(Borders::ALL).border_style(border).title(title);
+    // Viewport scroll — keep the selection inside the panel's visible
+    // rows (inside the border). `panel_scroll` persists between draws so
+    // the list doesn't jump until the selection actually leaves view.
+    let vis = area.height.saturating_sub(2) as usize;
+    let len = items.len();
+    let mut scroll = app.panel_scroll.get();
+    if app.sidebar_sel < scroll {
+        scroll = app.sidebar_sel;
+    } else if vis > 0 && app.sidebar_sel >= scroll + vis {
+        scroll = app.sidebar_sel + 1 - vis;
+    }
+    scroll = scroll.min(len.saturating_sub(vis));
+    app.panel_scroll.set(scroll);
+    let items: Vec<ListItem> = items.into_iter().skip(scroll).take(vis).collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .title(title);
     frame.render_widget(List::new(items).block(block), area);
 }
 
@@ -322,24 +340,39 @@ fn draw_selection_overlay(
     sel: &crate::copy::CopyState,
     show_cursor: bool,
 ) {
-    let Some(project) = app.active_project() else { return };
+    let Some(project) = app.active_project() else {
+        return;
+    };
     let rect = if project.top_float().map(|f| f.id) == Some(sel.pane_id) {
         crate::layout::float_rect(overlay, project.floats.len() - 1, app.config.float_pct)
     } else {
         let render = project.render_indices();
-        let Some(vi) = render.iter().position(|&i| project.panes[i].id == sel.pane_id) else {
+        let Some(vi) = render
+            .iter()
+            .position(|&i| project.panes[i].id == sel.pane_id)
+        else {
             return;
         };
-        let rects = pane_rects(main_area, render.len(), project.col_split, project.row_split);
+        let rects = pane_rects(
+            main_area,
+            render.len(),
+            project.col_split,
+            project.row_split,
+        );
         rects[vi]
     };
     // Grid panes always draw LEFT+TOP (only RIGHT/BOTTOM are shared), so
     // content starts one cell in from the rect origin either way.
-    let Some(pane) = app.pane_by_id(sel.pane_id) else { return };
+    let Some(pane) = app.pane_by_id(sel.pane_id) else {
+        return;
+    };
     let (view_top, h) = match pane.parser.lock() {
         Ok(mut p) => {
             let s = p.screen_mut();
-            (crate::search::scrollback_len(s) - s.scrollback(), s.size().0 as usize)
+            (
+                crate::search::scrollback_len(s) - s.scrollback(),
+                s.size().0 as usize,
+            )
         }
         Err(_) => return,
     };
@@ -356,7 +389,11 @@ fn draw_selection_overlay(
         }
     };
     if let Some(anchor) = sel.anchor {
-        let (a, b) = if anchor <= sel.cursor { (anchor, sel.cursor) } else { (sel.cursor, anchor) };
+        let (a, b) = if anchor <= sel.cursor {
+            (anchor, sel.cursor)
+        } else {
+            (sel.cursor, anchor)
+        };
         let inner_w = rect.width.saturating_sub(2) as usize;
         for r in a.0..=b.0 {
             let c0 = if r == a.0 { a.1 } else { 0 };
@@ -451,7 +488,8 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                             .to_string()
                     }
                     crate::app::PanelView::Files => {
-                        "j/k move  h/l fold  enter open  tab projects  esc back".to_string()
+                        "j/k move  h/l fold  enter open  . hidden  tab projects  esc back"
+                            .to_string()
                     }
                 },
             },
@@ -512,7 +550,9 @@ fn centered_rect(area: Rect, items: usize) -> Rect {
 }
 
 fn draw_palette(frame: &mut Frame, app: &App) {
-    let Some(pal) = app.palette.as_ref() else { return };
+    let Some(pal) = app.palette.as_ref() else {
+        return;
+    };
     let rect = centered_rect(frame.area(), pal.filtered().len());
     frame.render_widget(Clear, rect);
     let block = Block::default().borders(Borders::ALL).title("Command");
@@ -611,7 +651,8 @@ mod tests {
     fn three_panes_share_border_lines_no_dead_gap() {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         for _ in 0..3 {
             app.spawn_pane(None);
         }
@@ -641,7 +682,8 @@ mod tests {
     fn float_renders_centered_over_the_grid() {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.spawn_pane(None);
         app.spawn_float("my-popup", "exec true");
 
@@ -662,6 +704,39 @@ mod tests {
         assert!(buffer_contains(buffer, "pane-"));
     }
 
+    #[test]
+    fn files_panel_scrolls_selection_into_view() {
+        let dir = std::env::temp_dir().join(format!("rustterm-scroll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..40 {
+            std::fs::write(dir.join(format!("f{i:02}.txt")), "").unwrap();
+        }
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), dir.clone()));
+        app.enter_sidebar();
+        // Selection far below the fold — the draw must scroll to it.
+        app.sidebar_sel = 30;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert!(app.panel_scroll.get() > 0, "viewport scrolled");
+        assert!(buffer_contains(buffer, "f30.txt"), "selected row rendered");
+        assert!(!buffer_contains(buffer, "f00.txt"), "top rows scrolled off");
+
+        // Scrolling back up restores the top of the list.
+        app.sidebar_sel = 0;
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(buffer_contains(buffer, "f00.txt"));
+        assert_eq!(app.panel_scroll.get(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// All cells of row `y` joined — for substring checks on one row.
     fn row_contains(buffer: &Buffer, y: u16, needle: &str) -> bool {
         let row: String = (0..buffer.area.width)
@@ -674,8 +749,10 @@ mod tests {
     fn sidebar_shows_project_names() {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("alpha".into(), PathBuf::from("/tmp")));
-        app.projects.push(Project::new("beta".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("alpha".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("beta".into(), PathBuf::from("/tmp")));
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -690,8 +767,10 @@ mod tests {
     fn active_project_row_is_highlighted() {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("alpha".into(), PathBuf::from("/tmp")));
-        app.projects.push(Project::new("beta".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("alpha".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("beta".into(), PathBuf::from("/tmp")));
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -746,7 +825,17 @@ mod tests {
         let mut app = App::new(tx, atx);
         let mut project = Project::new("demo".into(), PathBuf::from("/tmp"));
         let (pane_tx, _pane_rx) = mpsc::channel();
-        let pane = Pane::spawn(1, "my-pane-title".into(), 24, 80, None, pane_tx, None, 10_000).unwrap();
+        let pane = Pane::spawn(
+            1,
+            "my-pane-title".into(),
+            24,
+            80,
+            None,
+            pane_tx,
+            None,
+            10_000,
+        )
+        .unwrap();
         project.panes.push(pane);
         app.projects.push(project);
 
@@ -792,14 +881,18 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &app)).unwrap();
-        assert!(buffer_contains(terminal.backend().buffer(), "can't close the last project"));
+        assert!(buffer_contains(
+            terminal.backend().buffer(),
+            "can't close the last project"
+        ));
     }
 
     #[test]
     fn palette_overlay_lists_matching_commands() {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.mode = crate::app::InputMode::Palette;
         app.palette = Some(crate::palette::Palette::open(&app));
 
@@ -815,7 +908,8 @@ mod tests {
     fn palette_rect_stays_on_screen_on_tiny_terminal() {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.mode = crate::app::InputMode::Palette;
         app.palette = Some(crate::palette::Palette::open(&app));
 
@@ -827,8 +921,8 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let last_row = buffer.area.height - 1;
-        let bottom_edge_on_screen = (0..buffer.area.width)
-            .any(|x| buffer[(x, last_row)].symbol() == "└");
+        let bottom_edge_on_screen =
+            (0..buffer.area.width).any(|x| buffer[(x, last_row)].symbol() == "└");
         assert!(bottom_edge_on_screen);
     }
 
@@ -836,7 +930,8 @@ mod tests {
     fn line_input_shows_completion_hints() {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.mode = crate::app::InputMode::LineInput(crate::app::LinePurpose::AddProject);
         let mut edit = crate::text_input::LineEdit::from_str("/tmp/fo");
         edit.suggestions = vec!["foo".into(), "foobar".into()];
@@ -845,14 +940,18 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &app)).unwrap();
-        assert!(buffer_contains(terminal.backend().buffer(), "foo/  foobar/"));
+        assert!(buffer_contains(
+            terminal.backend().buffer(),
+            "foo/  foobar/"
+        ));
     }
 
     #[test]
     fn line_input_prompt_shows_buffer() {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.mode = crate::app::InputMode::LineInput(crate::app::LinePurpose::AddProject);
         app.line_input = Some(crate::text_input::LineEdit::from_str("/tmp/fo"));
 
@@ -867,11 +966,17 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.panel_view = crate::app::PanelView::Git;
         app.git_status = Some(crate::git::GitStatus {
             branch: "main".into(),
-            files: vec![crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "src/app.rs".into() }],
+            files: vec![crate::git::ChangedFile {
+                status: 'M',
+                index: ' ',
+                worktree: 'M',
+                path: "src/app.rs".into(),
+            }],
         });
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -886,7 +991,8 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.mode = InputMode::Finder;
         app.finder = Some(crate::finder::FinderState::open(&PathBuf::from("/tmp")));
         let backend = TestBackend::new(80, 24);

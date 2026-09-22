@@ -16,12 +16,17 @@ pub struct FileRow {
 pub struct FileTree {
     pub root: PathBuf,
     pub rows: Vec<FileRow>,
+    pub show_hidden: bool,
 }
 
 impl FileTree {
-    pub fn new(root: PathBuf) -> FileTree {
-        let rows = read_children(&root, 0);
-        FileTree { root, rows }
+    pub fn new(root: PathBuf, show_hidden: bool) -> FileTree {
+        let rows = read_children(&root, 0, show_hidden);
+        FileTree {
+            root,
+            rows,
+            show_hidden,
+        }
     }
 
     /// Enter on a dir expands/collapses it; on a file returns the path
@@ -74,7 +79,7 @@ impl FileTree {
         };
         row.expanded = !row.expanded;
         if row.expanded {
-            let kids = read_children(&row.path.clone(), row.depth + 1);
+            let kids = read_children(&row.path.clone(), row.depth + 1, self.show_hidden);
             self.rows.splice(sel + 1..sel + 1, kids);
         } else {
             let depth = self.rows[sel].depth;
@@ -87,13 +92,19 @@ impl FileTree {
     }
 }
 
-fn read_children(dir: &Path, depth: usize) -> Vec<FileRow> {
+fn read_children(dir: &Path, depth: usize, show_hidden: bool) -> Vec<FileRow> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()
                 .map(|e| e.path())
-                // .git internals are noise — never useful to browse here.
-                .filter(|p| p.file_name().map(|n| n != ".git").unwrap_or(true))
+                // Dotfiles (incl. .git) hide until the caller asks —
+                // same convention as ranger/nnn.
+                .filter(|p| {
+                    show_hidden
+                        || p.file_name()
+                            .map(|n| !n.to_string_lossy().starts_with('.'))
+                            .unwrap_or(true)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -126,17 +137,40 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rustterm-tree-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src/nested")).unwrap();
+        fs::create_dir_all(dir.join(".git/objects")).unwrap();
         fs::write(dir.join("src/main.rs"), "").unwrap();
         fs::write(dir.join("src/nested/deep.rs"), "").unwrap();
         fs::write(dir.join("b.txt"), "").unwrap();
         fs::write(dir.join("a.txt"), "").unwrap();
+        fs::write(dir.join(".env"), "").unwrap();
         dir
+    }
+
+    #[test]
+    fn dotfiles_hide_until_show_hidden() {
+        let dir = tree_fixture("hidden");
+        let t = FileTree::new(dir.clone(), false);
+        let names: Vec<String> = t
+            .rows
+            .iter()
+            .map(|r| r.path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["src", "a.txt", "b.txt"], "dotfiles hidden");
+
+        let t = FileTree::new(dir.clone(), true);
+        let names: Vec<String> = t
+            .rows
+            .iter()
+            .map(|r| r.path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec![".git", "src", ".env", "a.txt", "b.txt"]);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn root_lists_dirs_first_then_files_sorted() {
         let dir = tree_fixture("root");
-        let t = FileTree::new(dir.clone());
+        let t = FileTree::new(dir.clone(), false);
         let names: Vec<String> = t
             .rows
             .iter()
@@ -149,7 +183,7 @@ mod tests {
     #[test]
     fn expand_inserts_children_and_collapse_removes_them() {
         let dir = tree_fixture("expand");
-        let mut t = FileTree::new(dir.clone());
+        let mut t = FileTree::new(dir.clone(), false);
         t.activate(0); // expand src/
         assert_eq!(t.rows.len(), 5); // src + nested + main.rs + a.txt + b.txt
         assert!(t.rows[0].expanded);
@@ -164,7 +198,7 @@ mod tests {
     #[test]
     fn activate_file_returns_path_dir_returns_none() {
         let dir = tree_fixture("activate");
-        let mut t = FileTree::new(dir.clone());
+        let mut t = FileTree::new(dir.clone(), false);
         assert_eq!(t.activate(1).unwrap().file_name().unwrap(), "a.txt");
         assert!(t.activate(0).is_none(), "dir toggles, no open path");
         let _ = fs::remove_dir_all(&dir);
@@ -173,7 +207,7 @@ mod tests {
     #[test]
     fn collapse_or_parent_walks_up_the_tree() {
         let dir = tree_fixture("collapse");
-        let mut t = FileTree::new(dir.clone());
+        let mut t = FileTree::new(dir.clone(), false);
         t.expand(0); // src/
         t.expand(1); // nested/
         assert_eq!(t.rows[2].depth, 2); // deep.rs

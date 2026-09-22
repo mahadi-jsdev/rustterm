@@ -78,11 +78,17 @@ fn main() -> anyhow::Result<()> {
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::event::EnableMouseCapture,
-        crossterm::event::EnableBracketedPaste
+        crossterm::event::EnableBracketedPaste,
+        // Disambiguated keys: C-S-h arrives distinct from plain ^H /
+        // Backspace on kitty-protocol terminals; ignored elsewhere.
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        )
     );
     let result = rustterm::runloop::run(&mut terminal, &mut app, &events_rx, &app_rx, None);
     let _ = crossterm::execute!(
         std::io::stdout(),
+        crossterm::event::PopKeyboardEnhancementFlags,
         crossterm::event::DisableBracketedPaste,
         crossterm::event::DisableMouseCapture
     );

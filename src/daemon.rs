@@ -420,12 +420,16 @@ fn attached_phase(
         std::io::stdout(),
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableMouseCapture,
-        crossterm::event::EnableBracketedPaste
+        crossterm::event::EnableBracketedPaste,
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        )
     );
     let _ = crate::runloop::run(&mut terminal, app, events_rx, app_rx, Some(dead.clone()));
     let _ = crossterm::execute!(
         std::io::stdout(),
         crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::PopKeyboardEnhancementFlags,
         crossterm::event::DisableBracketedPaste,
         crossterm::event::DisableMouseCapture
     );
@@ -494,6 +498,7 @@ fn client_cleanup() {
         std::io::stdout(),
         crossterm::event::DisableMouseCapture,
         crossterm::event::DisableBracketedPaste,
+        crossterm::event::PopKeyboardEnhancementFlags,
         crossterm::terminal::LeaveAlternateScreen
     );
     let _ = crossterm::terminal::disable_raw_mode();

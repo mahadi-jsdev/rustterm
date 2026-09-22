@@ -46,11 +46,17 @@ pub enum LinePurpose {
 }
 
 pub enum AppEvent {
-    GitStatus { root: PathBuf, status: Option<crate::git::GitStatus> },
+    GitStatus {
+        root: PathBuf,
+        status: Option<crate::git::GitStatus>,
+    },
     /// `root` is the project root polled when the worker started — the
     /// commit must target THAT repo even if the user switched projects
     /// while the request was in flight.
-    AiMessage { root: PathBuf, result: Result<String, String> },
+    AiMessage {
+        root: PathBuf,
+        result: Result<String, String>,
+    },
 }
 
 pub struct App {
@@ -67,11 +73,18 @@ pub struct App {
     pub last_watch_poll: Instant,
     pub app_tx: mpsc::Sender<AppEvent>,
     pub sidebar_sel: usize,
+    /// Panel list scroll offset — owned by the renderer (draw keeps the
+    /// selection inside the viewport), read by click hit-testing.
+    /// `Cell` because draw only holds `&App`.
+    pub panel_scroll: std::cell::Cell<usize>,
     pub sidebar_branches: bool,
     /// Which content the bottom sidebar panel shows (default Files).
     pub panel_view: PanelView,
     /// Lazy file tree for the Files view — rebuilt per project root.
     pub files: Option<crate::files::FileTree>,
+    /// Dotfiles hidden by default; C-S-h (or `.`) toggles — rebuilds
+    /// the tree.
+    pub files_show_hidden: bool,
     /// Focused sidebar section — `enter_sidebar` (leader g/e) lands on
     /// Panel; clicking a project row focuses Projects.
     pub sidebar_focus: SidebarSection,
@@ -141,8 +154,10 @@ impl App {
             last_watch_poll: Instant::now(),
             app_tx,
             sidebar_sel: 0,
+            panel_scroll: std::cell::Cell::new(0),
             panel_view: PanelView::Files,
             files: None,
+            files_show_hidden: false,
             sidebar_focus: SidebarSection::Panel,
             sidebar_branches: false,
             sidebar_branch_list: vec![],
@@ -245,16 +260,40 @@ impl App {
             self.ensure_active_pane();
             self.clear_git_cache();
             // The file tree is rooted at the project — rebuild on switch.
-            self.files = self.active_root().map(crate::files::FileTree::new);
+            self.rebuild_files();
+            self.sidebar_sel = 0;
+            self.panel_scroll.set(0);
         }
+    }
+
+    /// Rebuild the Files tree for the active root — on project switch,
+    /// hidden-toggle, or first lazy access.
+    fn rebuild_files(&mut self) {
+        let show = self.files_show_hidden;
+        self.files = self
+            .active_root()
+            .map(|r| crate::files::FileTree::new(r, show));
     }
 
     /// Builds the sidebar file tree for the active root if needed —
     /// lazy so a sidebar that never opens never pays for it.
     pub fn ensure_files(&mut self) {
         if self.files.is_none() {
-            self.files = self.active_root().map(crate::files::FileTree::new);
+            self.rebuild_files();
         }
+    }
+
+    /// C-S-h / `.` in the Files panel — show or hide dotfiles.
+    pub fn toggle_files_hidden(&mut self) {
+        self.files_show_hidden = !self.files_show_hidden;
+        self.rebuild_files();
+        self.sidebar_sel = 0;
+        self.panel_scroll.set(0);
+        self.flash(if self.files_show_hidden {
+            "dotfiles shown"
+        } else {
+            "dotfiles hidden"
+        });
     }
 
     pub fn ensure_active_pane(&mut self) {
@@ -404,7 +443,11 @@ impl App {
             project.col_split = sp.col_split.clamp(0.15, 0.85);
             project.row_split = sp.row_split.clamp(0.15, 0.85);
             for pp in &sp.panes {
-                let cwd = if pp.cwd.is_dir() { pp.cwd.clone() } else { sp.root.clone() };
+                let cwd = if pp.cwd.is_dir() {
+                    pp.cwd.clone()
+                } else {
+                    sp.root.clone()
+                };
                 let id = self.alloc_pane_id();
                 match Pane::spawn(
                     id,
@@ -418,8 +461,7 @@ impl App {
                 ) {
                     Ok(mut pane) => {
                         pane.hidden = pp.hidden;
-                        pane.color =
-                            pp.color.as_deref().and_then(crate::session::color_from_str);
+                        pane.color = pp.color.as_deref().and_then(crate::session::color_from_str);
                         project.panes.push(pane);
                     }
                     Err(_) => continue,
@@ -706,7 +748,10 @@ impl App {
         if n == 0 {
             return;
         }
-        let cur = (self.active_project, self.active_project().map(|p| p.active_pane).unwrap_or(0));
+        let cur = (
+            self.active_project,
+            self.active_project().map(|p| p.active_pane).unwrap_or(0),
+        );
         // Ordered (project, pane) pairs flagged — traverse all panes in
         // order, find the first flagged strictly after `cur`, else wrap
         // to the first flagged overall.
@@ -766,8 +811,12 @@ impl App {
     pub fn copy_move(&mut self, drow: i64, dcol: i64) {
         // Two-step: copy the pane id first — holding &mut self.copy blocks
         // the &self borrow pane_by_id needs.
-        let Some(pane_id) = self.copy.as_ref().map(|c| c.pane_id) else { return };
-        let Some((r, c)) = self.copy.as_ref().map(|cc| cc.cursor) else { return };
+        let Some(pane_id) = self.copy.as_ref().map(|c| c.pane_id) else {
+            return;
+        };
+        let Some((r, c)) = self.copy.as_ref().map(|cc| cc.cursor) else {
+            return;
+        };
         let Some(pane) = self.pane_by_id(pane_id) else {
             self.copy = None;
             self.mode = InputMode::Normal;
@@ -817,7 +866,11 @@ impl App {
     /// `v` — toggle the selection anchor at the cursor.
     pub fn copy_toggle_anchor(&mut self) {
         if let Some(copy) = self.copy.as_mut() {
-            copy.anchor = if copy.anchor.is_some() { None } else { Some(copy.cursor) };
+            copy.anchor = if copy.anchor.is_some() {
+                None
+            } else {
+                Some(copy.cursor)
+            };
         }
     }
 
@@ -826,7 +879,9 @@ impl App {
     pub fn copy_yank(&mut self) {
         let Some(copy) = self.copy.take() else { return };
         self.mode = InputMode::Normal;
-        let Some(pane) = self.pane_by_id(copy.pane_id) else { return };
+        let Some(pane) = self.pane_by_id(copy.pane_id) else {
+            return;
+        };
         let text = {
             let mut p = pane.parser.lock().unwrap();
             let lines = crate::search::grid_lines(p.screen_mut());
@@ -893,8 +948,7 @@ impl App {
         let sb = crate::search::scrollback_len(s);
         let view_top = sb - s.scrollback();
         let (h, w) = s.size();
-        let row = (view_top + (pos.y - inner.y) as usize)
-            .min((sb + h as usize).saturating_sub(1));
+        let row = (view_top + (pos.y - inner.y) as usize).min((sb + h as usize).saturating_sub(1));
         let col = ((pos.x - inner.x) as usize).min((w as usize).saturating_sub(1));
         Some((row, col))
     }
@@ -944,8 +998,7 @@ impl App {
             return;
         }
         if self.sidebar_branches {
-            if let (Some(root), Some(branch)) =
-                (self.active_root(), self.sidebar_selected_branch())
+            if let (Some(root), Some(branch)) = (self.active_root(), self.sidebar_selected_branch())
             {
                 match crate::git::switch(&root, &branch) {
                     Ok(()) => {
@@ -987,11 +1040,7 @@ impl App {
             .or_else(|| std::env::var("VISUAL").ok().filter(|s| !s.is_empty()))
             .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
             .unwrap_or_else(|| "nvim".to_string());
-        let cmd = format!(
-            "exec {} {}",
-            editor,
-            shell_quote(&path.to_string_lossy())
-        );
+        let cmd = format!("exec {} {}", editor, shell_quote(&path.to_string_lossy()));
         let title = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -1025,7 +1074,9 @@ impl App {
             self.flash("ai commit already running");
             return;
         }
-        let Some(root) = self.active_root() else { return };
+        let Some(root) = self.active_root() else {
+            return;
+        };
         if let Err(e) = crate::git::add_all(&root) {
             self.flash(format!("git add: {e}"));
             return;
@@ -1059,8 +1110,12 @@ impl App {
 
     /// vim-style / — find matches in the focused pane, jump to the last.
     pub fn start_search(&mut self, query: &str) {
-        let Some(project) = self.active_project_mut() else { return };
-        let Some(pane) = project.active_pane_mut() else { return };
+        let Some(project) = self.active_project_mut() else {
+            return;
+        };
+        let Some(pane) = project.active_pane_mut() else {
+            return;
+        };
         let matches = pane
             .parser
             .lock()
@@ -1141,7 +1196,8 @@ mod tests {
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
         for name in names {
-            app.projects.push(Project::new((*name).into(), PathBuf::from("/tmp")));
+            app.projects
+                .push(Project::new((*name).into(), PathBuf::from("/tmp")));
         }
         app
     }
@@ -1247,7 +1303,12 @@ mod tests {
         app.spawn_pane(None);
         for i in 0..6 {
             app.spawn_pane(None);
-            app.active_project_mut().unwrap().panes.last_mut().unwrap().title = format!("t{i}");
+            app.active_project_mut()
+                .unwrap()
+                .panes
+                .last_mut()
+                .unwrap()
+                .title = format!("t{i}");
             app.close_active_pane();
         }
         assert_eq!(app.closed_panes.len(), 5);
@@ -1335,8 +1396,18 @@ mod tests {
         app.git_status = Some(crate::git::GitStatus {
             branch: "main".into(),
             files: vec![
-                crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "a".into() },
-                crate::git::ChangedFile { status: '?', index: '?', worktree: '?', path: "b".into() },
+                crate::git::ChangedFile {
+                    status: 'M',
+                    index: ' ',
+                    worktree: 'M',
+                    path: "a".into(),
+                },
+                crate::git::ChangedFile {
+                    status: '?',
+                    index: '?',
+                    worktree: '?',
+                    path: "b".into(),
+                },
             ],
         });
         assert_eq!(app.sidebar_items_len(), 2);
@@ -1350,7 +1421,12 @@ mod tests {
         let mut app = app_with_one_project();
         app.git_status = Some(crate::git::GitStatus {
             branch: "m".into(),
-            files: vec![crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "a".into() }],
+            files: vec![crate::git::ChangedFile {
+                status: 'M',
+                index: ' ',
+                worktree: 'M',
+                path: "a".into(),
+            }],
         });
         app.sidebar_move(1);
         assert_eq!(app.sidebar_sel, 0); // wraps or clamps to len-1
@@ -1364,13 +1440,21 @@ mod tests {
         app.panel_view = PanelView::Git;
         app.git_status = Some(crate::git::GitStatus {
             branch: "m".into(),
-            files: vec![crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "src/a.rs".into() }],
+            files: vec![crate::git::ChangedFile {
+                status: 'M',
+                index: ' ',
+                worktree: 'M',
+                path: "src/a.rs".into(),
+            }],
         });
         app.sidebar_sel = 0;
         app.sidebar_activate();
         let project = app.active_project().unwrap();
         assert_eq!(project.floats.len(), 1);
-        assert!(project.panes.is_empty(), "diff opens as popup, not a grid pane");
+        assert!(
+            project.panes.is_empty(),
+            "diff opens as popup, not a grid pane"
+        );
         let cmd = project.floats[0].startup_command.as_deref().unwrap();
         // No `exec` — a short diff must stay up instead of flashing closed.
         assert_eq!(cmd, "git --no-pager diff HEAD --color=always -- 'src/a.rs'");
@@ -1460,7 +1544,12 @@ mod tests {
         let mut app = app_with_projects(&["a", "b"]);
         app.git_status = Some(crate::git::GitStatus {
             branch: "main".into(),
-            files: vec![crate::git::ChangedFile { status: 'M', index: ' ', worktree: 'M', path: "x".into() }],
+            files: vec![crate::git::ChangedFile {
+                status: 'M',
+                index: ' ',
+                worktree: 'M',
+                path: "x".into(),
+            }],
         });
         app.sidebar_branch_list = vec!["main".into()];
         app.set_active_project(1);
@@ -1594,10 +1683,7 @@ mod tests {
             PathBuf::from("/tmp"),
             "missing cwd falls back to project root"
         );
-        assert_eq!(
-            p.panes[1].startup_command.as_deref(),
-            Some("npm run dev")
-        );
+        assert_eq!(p.panes[1].startup_command.as_deref(), Some("npm run dev"));
         assert!((p.col_split - 0.7).abs() < f32::EPSILON);
         assert_eq!(p.active_pane, 0);
     }

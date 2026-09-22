@@ -124,9 +124,11 @@ the view too.
 
 - **Projects**: `j`/`k` switches projects live, `Enter` opens, `Esc` back.
   Clicking a project row focuses this section (and switches).
-- **Files**: lazy directory tree, dirs first — `j`/`k` moves, `l`/`→`
-  expands, `h`/`←`/`Backspace` collapses or hops to the parent, `Enter`
-  toggles a dir or opens a file in an editor popup. `.git` is hidden.
+- **Files**: lazy directory tree, dirs first — `j`/`k` moves (the list
+  scrolls to follow), `l`/`→` expands, `h`/`←`/`Backspace` collapses or
+  hops to the parent, `Enter` toggles a dir or opens a file in an editor
+  popup. Dotfiles are hidden by default — `Ctrl+Shift+H` (kitty-protocol
+  terminals) or `.` toggles them.
 - **Git**: `j`/`k` moves, `Enter` opens a diff popup (files) or
   `git switch` (branches — `b` toggles the list), `space` stages/unstages,
   `c` generates an AI commit message and prefills the commit prompt.
@@ -152,8 +154,11 @@ Clicking inside the pane places the cursor; dragging selects.
 - **`Shift`+drag** — select even when the app captures the mouse
 - **Wheel** — scroll the pane under the cursor (forwarded to apps like
   nvim/lazygit when they ask for it)
-- **Click sidebar** — projects switch, git rows select/activate,
-  "Projects" title row collapses the panel
+- **Click sidebar** — projects switch, panel rows select/activate,
+  "Projects" title row collapses the panel, the panel title toggles
+  Files ↔ Git
+- **Wheel over sidebar** — scrolls the panel list / switches projects
+  (while the sidebar is focused)
 
 ## Configuration
 

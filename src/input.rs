@@ -78,7 +78,9 @@ fn mouse_down(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     } else {
         // Sidebar/status-bar presses are UI clicks — never selections.
         click(app, mouse, frame_area);
-        let Some(project) = app.active_project() else { return };
+        let Some(project) = app.active_project() else {
+            return;
+        };
         let render = project.render_indices();
         let rects =
             crate::layout::pane_rects(main, render.len(), project.col_split, project.row_split);
@@ -91,8 +93,12 @@ fn mouse_down(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
                 app.cell_in_pane(id, pos, *r).map(|cell| (id, *r, cell))
             })
     };
-    let Some((id, rect, cell)) = target else { return };
-    let Some(pane) = app.pane_by_id(id) else { return };
+    let Some((id, rect, cell)) = target else {
+        return;
+    };
+    let Some(pane) = app.pane_by_id(id) else {
+        return;
+    };
     if pane.mouse_reporting() && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
         // The app owns the mouse: forward the press, remember it owns
         // drag/release until the button comes up.
@@ -120,7 +126,9 @@ fn mouse_drag(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     let pos = Position::new(mouse.column, mouse.row);
     let (main, overlay) = selectable_areas(app, frame_area);
     if app.mouse_dragging {
-        let Some(id) = app.mouse_sel.as_ref().map(|s| s.pane_id) else { return };
+        let Some(id) = app.mouse_sel.as_ref().map(|s| s.pane_id) else {
+            return;
+        };
         let Some(rect) = app.pane_screen_rect(id, main, overlay) else {
             app.mouse_sel = None;
             app.mouse_dragging = false;
@@ -192,8 +200,11 @@ fn mouse_drag(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
 fn mouse_up(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     if let Some(id) = app.mouse_app.take() {
         if let (Some(rect), Some(pane)) = (
-            app.pane_screen_rect(id, selectable_areas(app, frame_area).0,
-                selectable_areas(app, frame_area).1),
+            app.pane_screen_rect(
+                id,
+                selectable_areas(app, frame_area).0,
+                selectable_areas(app, frame_area).1,
+            ),
             app.pane_by_id(id),
         ) {
             let pos = Position::new(mouse.column, mouse.row);
@@ -255,10 +266,26 @@ fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
         }
         return;
     }
-    let (_, main, _) = crate::layout::frame_areas(frame_area, sidebar_visible, sidebar_width);
+    let (sidebar, main, _) = crate::layout::frame_areas(frame_area, sidebar_visible, sidebar_width);
+    // Wheel over the sidebar only acts when the sidebar already owns the
+    // keyboard — a stray flick in Normal mode must not steal focus.
+    if sidebar_visible && sidebar.contains(pos) {
+        if matches!(app.mode, InputMode::Sidebar) {
+            let project_h = (app.projects.len() as u16 + 2).min(10).min(sidebar.height);
+            if pos.y >= sidebar.y + project_h {
+                app.sidebar_focus = crate::app::SidebarSection::Panel;
+                app.sidebar_move(if up { -(scroll as i32) } else { scroll as i32 });
+            } else {
+                app.sidebar_focus = crate::app::SidebarSection::Projects;
+                app.sidebar_project_move(if up { -1 } else { 1 });
+            }
+        }
+        return;
+    }
     let render = project.render_indices();
     let visible: Vec<&crate::pane::Pane> = render.iter().map(|&i| &project.panes[i]).collect();
-    let rects = crate::layout::pane_rects(main, visible.len(), project.col_split, project.row_split);
+    let rects =
+        crate::layout::pane_rects(main, visible.len(), project.col_split, project.row_split);
     let Some((pane, rect)) = visible
         .iter()
         .zip(rects.iter())
@@ -275,8 +302,10 @@ fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
             rect.x + rect.width - u16::from(borders.contains(ratatui::widgets::Borders::RIGHT));
         let inner_bottom =
             rect.y + rect.height - u16::from(borders.contains(ratatui::widgets::Borders::BOTTOM));
-        if mouse.column > rect.x && mouse.column < inner_right
-            && mouse.row > rect.y && mouse.row < inner_bottom
+        if mouse.column > rect.x
+            && mouse.column < inner_right
+            && mouse.row > rect.y
+            && mouse.row < inner_bottom
         {
             let x = mouse.column - rect.x;
             let y = mouse.row - rect.y;
@@ -364,7 +393,9 @@ fn click_sidebar(app: &mut App, pos: Position, sidebar: Rect) {
         app.enter_sidebar();
         return;
     }
-    let row = (pos.y - git_top - 1) as usize;
+    // Panel rows render through a viewport — map the screen row back to
+    // the list index via the scroll offset the last draw recorded.
+    let row = app.panel_scroll.get() + (pos.y - git_top - 1) as usize;
     if row < app.sidebar_items_len() {
         if matches!(app.mode, InputMode::Sidebar)
             && app.sidebar_focus == crate::app::SidebarSection::Panel
@@ -393,7 +424,14 @@ fn btn_bytes(code: u8, release: bool, x: u16, y: u16, sgr: bool) -> Vec<u8> {
         format!("\x1b[<{code};{x};{y}{tail}").into_bytes()
     } else {
         let btn = 32 + if release { 3 } else { code };
-        vec![0x1b, b'[', b'M', btn, (x as u8).saturating_add(32), (y as u8).saturating_add(32)]
+        vec![
+            0x1b,
+            b'[',
+            b'M',
+            btn,
+            (x as u8).saturating_add(32),
+            (y as u8).saturating_add(32),
+        ]
     }
 }
 
@@ -404,7 +442,14 @@ fn wheel_bytes(up: bool, x: u16, y: u16, sgr: bool) -> Vec<u8> {
     if sgr {
         format!("\x1b[<{btn};{x};{y}M").into_bytes()
     } else {
-        vec![0x1b, b'[', b'M', btn + 32, (x.min(223) as u8) + 32, (y.min(223) as u8) + 32]
+        vec![
+            0x1b,
+            b'[',
+            b'M',
+            btn + 32,
+            (x.min(223) as u8) + 32,
+            (y.min(223) as u8) + 32,
+        ]
     }
 }
 
@@ -498,7 +543,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Char('d') => {
                     // A keeper's own socket is always alive — only refuse
                     // when a FOREIGN keeper holds it.
-                    if !app.is_keeper && crate::daemon::keeper_alive_at(&crate::daemon::socket_path()) {
+                    if !app.is_keeper
+                        && crate::daemon::keeper_alive_at(&crate::daemon::socket_path())
+                    {
                         app.flash("a detached session already exists");
                     } else {
                         app.detach_requested = true;
@@ -538,8 +585,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 }
                 KeyCode::Up => pal.move_prev(),
                 KeyCode::Down => pal.move_next(),
-                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => pal.move_prev(),
-                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => pal.move_next(),
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    pal.move_prev()
+                }
+                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    pal.move_next()
+                }
                 KeyCode::Backspace => {
                     let mut q = pal.query.clone();
                     q.pop();
@@ -575,13 +626,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     }
                     // Moving switches projects live — the row itself is
                     // the switch (same as clicking through the list).
-                    KeyCode::Char('j') if key.modifiers.is_empty() => {
-                        app.sidebar_project_move(1)
-                    }
+                    KeyCode::Char('j') if key.modifiers.is_empty() => app.sidebar_project_move(1),
                     KeyCode::Down => app.sidebar_project_move(1),
-                    KeyCode::Char('k') if key.modifiers.is_empty() => {
-                        app.sidebar_project_move(-1)
-                    }
+                    KeyCode::Char('k') if key.modifiers.is_empty() => app.sidebar_project_move(-1),
                     KeyCode::Up => app.sidebar_project_move(-1),
                     // Enter commits to the chosen project — back to panes.
                     KeyCode::Enter => {
@@ -617,6 +664,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     },
                     // Files view — h folds/jumps up, l expands.
                     _ => match key.code {
+                        // C-(S-)h toggles dotfiles — terminals deliver it
+                        // as ctrl+h, or ctrl+shift+H under kitty keys.
+                        // `.` is the portable fallback (ranger/nnn).
+                        KeyCode::Char('h') | KeyCode::Char('H')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            app.toggle_files_hidden()
+                        }
+                        KeyCode::Char('.') if key.modifiers.is_empty() => app.toggle_files_hidden(),
                         KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
                             app.files_collapse_or_parent()
                         }
@@ -644,8 +700,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 }
                 KeyCode::Up => f.move_prev(),
                 KeyCode::Down => f.move_next(),
-                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => f.move_prev(),
-                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => f.move_next(),
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    f.move_prev()
+                }
+                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    f.move_next()
+                }
                 KeyCode::Backspace => {
                     let mut q = f.query.clone();
                     q.pop();
@@ -858,7 +918,8 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app
     }
 
@@ -879,15 +940,17 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(app.should_quit);
-        assert!(matches!(app.mode, InputMode::Normal), "mode should revert after a leader command");
+        assert!(
+            matches!(app.mode, InputMode::Normal),
+            "mode should revert after a leader command"
+        );
     }
 
     #[test]
     fn leader_then_d_requests_detach() {
         // Isolate from any live keeper on the default socket — a real
         // detached session would (correctly) refuse this leader d.
-        let sock = std::env::temp_dir()
-            .join(format!("rustterm-test-sock-{}", std::process::id()));
+        let sock = std::env::temp_dir().join(format!("rustterm-test-sock-{}", std::process::id()));
         std::env::set_var("RUSTTERM_SOCK", &sock);
         let mut app = app_with_one_project();
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
@@ -905,7 +968,8 @@ mod tests {
     #[test]
     fn leader_then_bracket_switches_project() {
         let mut app = app_with_one_project();
-        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("second".into(), PathBuf::from("/tmp")));
 
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char(']'), KeyModifiers::NONE));
@@ -1025,7 +1089,10 @@ mod tests {
         let mut app = app_with_one_project();
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert!(matches!(app.mode, InputMode::LineInput(LinePurpose::AddProject)));
+        assert!(matches!(
+            app.mode,
+            InputMode::LineInput(LinePurpose::AddProject)
+        ));
 
         // /etc not /tmp — the fixture project is already rooted at /tmp and
         // add_project dedupes on canonicalized root.
@@ -1046,7 +1113,10 @@ mod tests {
             handle_key(&mut app, key(KeyCode::Char(c), KeyModifiers::NONE));
         }
         handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(app.mode, InputMode::LineInput(LinePurpose::AddProject)));
+        assert!(matches!(
+            app.mode,
+            InputMode::LineInput(LinePurpose::AddProject)
+        ));
         assert!(app.line_input.as_ref().unwrap().error().is_some());
     }
 
@@ -1203,12 +1273,15 @@ mod tests {
     #[test]
     fn click_project_row_switches_project_and_keeps_normal() {
         let mut app = app_with_one_project();
-        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("second".into(), PathBuf::from("/tmp")));
         // Project rows live at sidebar.y+1 — row 1 is the second project.
         handle_mouse(&mut app, click_at(5, 2), frame80());
         assert_eq!(app.active_project, 1);
-        assert!(matches!(app.mode, InputMode::Normal),
-            "mouse project-switch keeps terminal focus");
+        assert!(
+            matches!(app.mode, InputMode::Normal),
+            "mouse project-switch keeps terminal focus"
+        );
     }
 
     #[test]
@@ -1261,7 +1334,8 @@ mod tests {
     #[test]
     fn clicks_are_ignored_while_palette_is_open() {
         let mut app = app_with_one_project();
-        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("second".into(), PathBuf::from("/tmp")));
         app.palette = Some(crate::palette::Palette::open(&app));
         app.mode = InputMode::Palette;
         handle_mouse(&mut app, click_at(5, 2), frame80()); // project row
@@ -1277,16 +1351,24 @@ mod tests {
             let pane = &app.active_project().unwrap().panes[0];
             // App enables SGR mouse reporting; wheel events then go to the
             // PTY and must not move the local scrollback offset.
-            pane.parser.lock().unwrap().process(b"\x1b[?1006h\x1b[?1000h");
+            pane.parser
+                .lock()
+                .unwrap()
+                .process(b"\x1b[?1006h\x1b[?1000h");
         }
         grow_scrollback(&app);
-        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 10), Rect::new(0, 0, 80, 24));
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::ScrollUp, 40, 10),
+            Rect::new(0, 0, 80, 24),
+        );
         assert_eq!(pane_scrollback(&app), 0);
     }
 
     #[test]
     fn tab_completes_unique_dir_and_descends() {
-        let root = std::env::temp_dir().join(format!("rustterm-input-compl-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("rustterm-input-compl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("projapp/src")).unwrap();
         std::fs::create_dir_all(root.join("other")).unwrap();
@@ -1362,7 +1444,10 @@ mod tests {
         assert_eq!(project.floats.len(), 1);
         assert!(project.panes.is_empty(), "popup must not join the grid");
         // exec'd so lazygit's own `q` exits the shell → popup auto-closes.
-        assert_eq!(project.floats[0].startup_command.as_deref(), Some("exec lazygit"));
+        assert_eq!(
+            project.floats[0].startup_command.as_deref(),
+            Some("exec lazygit")
+        );
         assert_eq!(project.floats[0].title, "lazygit");
     }
 
@@ -1397,7 +1482,11 @@ mod tests {
         };
         leader(&mut app, 'z');
         let project = app.active_project().unwrap();
-        assert_eq!(project.render_indices().len(), 1, "zoomed view renders one pane");
+        assert_eq!(
+            project.render_indices().len(),
+            1,
+            "zoomed view renders one pane"
+        );
 
         // Focus moves → zoom follows to the newly active pane.
         leader(&mut app, 'h');
@@ -1423,7 +1512,8 @@ mod tests {
     #[test]
     fn leader_dot_jumps_to_flagged_pane_across_projects() {
         let mut app = app_with_one_project();
-        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("second".into(), PathBuf::from("/tmp")));
         app.spawn_pane(None);
         app.spawn_pane(None);
         // Flag pane 0 in the CURRENT project and pane 1 — jump from pane 1
@@ -1484,7 +1574,11 @@ mod tests {
         let f = &app.git_status.as_ref().unwrap().files[0];
         assert!(f.staged_only(), "space staged the modified file");
         let staged = std::process::Command::new("git")
-            .arg("-C").arg(&root).args(["diff", "--cached", "--name-only"]).output().unwrap();
+            .arg("-C")
+            .arg(&root)
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .unwrap();
         assert!(String::from_utf8_lossy(&staged.stdout).contains("a.txt"));
 
         handle_key(&mut app, key(KeyCode::Char(' '), KeyModifiers::NONE));
@@ -1534,10 +1628,18 @@ mod tests {
         let (sb, offset, h) = {
             let mut p = pane.parser.lock().unwrap();
             let s = p.screen_mut();
-            (crate::search::scrollback_len(s), s.scrollback(), s.size().0 as usize)
+            (
+                crate::search::scrollback_len(s),
+                s.scrollback(),
+                s.size().0 as usize,
+            )
         };
         let view_top = sb - offset;
-        assert!(row >= view_top && row < view_top + h, "cursor {row} outside view {view_top}..{}", view_top + h);
+        assert!(
+            row >= view_top && row < view_top + h,
+            "cursor {row} outside view {view_top}..{}",
+            view_top + h
+        );
         assert!(offset > 0, "scrolled into scrollback");
     }
 
@@ -1559,7 +1661,11 @@ mod tests {
         assert!(app.copy.is_none());
         assert!(matches!(app.mode, InputMode::Normal));
         let pane = &app.active_project().unwrap().panes[0];
-        assert_eq!(pane.parser.lock().unwrap().screen().scrollback(), 0, "view restored to live");
+        assert_eq!(
+            pane.parser.lock().unwrap().screen().scrollback(),
+            0,
+            "view restored to live"
+        );
     }
 
     #[test]
@@ -1581,9 +1687,16 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Char('f'), KeyModifiers::NONE));
         handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
         let project = app.active_project().unwrap();
-        assert_eq!(project.floats.len(), 1, "finder opens the editor as a popup");
+        assert_eq!(
+            project.floats.len(),
+            1,
+            "finder opens the editor as a popup"
+        );
         let cmd = project.floats[0].startup_command.clone().unwrap();
-        assert!(cmd.starts_with("exec "), "expected exec'd editor command, got {cmd}");
+        assert!(
+            cmd.starts_with("exec "),
+            "expected exec'd editor command, got {cmd}"
+        );
     }
 
     #[test]
@@ -1606,8 +1719,24 @@ mod tests {
         }
         handle_key(&mut app, key(KeyCode::Char('i'), KeyModifiers::NONE));
         let project = app.active_project().unwrap();
-        assert_eq!(project.floats[0].parser.lock().unwrap().screen().scrollback(), 0);
-        assert_eq!(project.panes[0].parser.lock().unwrap().screen().scrollback(), 5);
+        assert_eq!(
+            project.floats[0]
+                .parser
+                .lock()
+                .unwrap()
+                .screen()
+                .scrollback(),
+            0
+        );
+        assert_eq!(
+            project.panes[0]
+                .parser
+                .lock()
+                .unwrap()
+                .screen()
+                .scrollback(),
+            5
+        );
     }
 
     #[test]
@@ -1620,7 +1749,10 @@ mod tests {
         }
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         handle_key(&mut app, key(KeyCode::Char('/'), KeyModifiers::NONE));
-        assert!(matches!(app.mode, InputMode::LineInput(LinePurpose::Search)));
+        assert!(matches!(
+            app.mode,
+            InputMode::LineInput(LinePurpose::Search)
+        ));
         for c in "searchable".chars() {
             handle_key(&mut app, key(KeyCode::Char(c), KeyModifiers::NONE));
         }
@@ -1673,8 +1805,96 @@ mod tests {
         // destructive side effect for a key users hit reflexively.
         handle_key(&mut app, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!app.ai_in_flight);
-        assert!(app.status_msg.is_none(), "no ai-commit path should have run");
+        assert!(
+            app.status_msg.is_none(),
+            "no ai-commit path should have run"
+        );
         assert!(matches!(app.mode, InputMode::Sidebar), "mode unchanged");
+    }
+
+    // ---- files panel: dotfiles toggle + wheel scroll ----
+
+    fn files_app(tag: &str, n_files: usize) -> (App, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("rustterm-fm-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), "").unwrap();
+        for i in 0..n_files {
+            std::fs::write(dir.join(format!("f{i:02}.txt")), "").unwrap();
+        }
+        let (tx, _rx) = mpsc::channel();
+        let (atx, _arx) = mpsc::channel();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), dir.clone()));
+        (app, dir)
+    }
+
+    fn file_names(app: &App) -> Vec<String> {
+        app.files
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r.path.file_name().unwrap().to_string_lossy().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn ctrl_h_toggles_dotfiles_in_files_panel() {
+        let (mut app, dir) = files_app("ctrlh", 2);
+        app.enter_sidebar();
+        assert_eq!(
+            file_names(&app),
+            vec!["f00.txt", "f01.txt"],
+            "dotfile hidden"
+        );
+        handle_key(&mut app, key(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        assert!(app.files_show_hidden);
+        assert_eq!(file_names(&app), vec![".env", "f00.txt", "f01.txt"]);
+        handle_key(&mut app, key(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        assert!(!app.files_show_hidden);
+        assert_eq!(file_names(&app), vec!["f00.txt", "f01.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dot_key_toggles_dotfiles_as_fallback() {
+        let (mut app, dir) = files_app("dot", 1);
+        app.enter_sidebar();
+        handle_key(&mut app, key(KeyCode::Char('.'), KeyModifiers::NONE));
+        assert!(app.files_show_hidden);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wheel_over_panel_scrolls_selection_in_sidebar_mode() {
+        let (mut app, dir) = files_app("wheel", 8);
+        let frame = Rect::new(0, 0, 80, 24);
+        // Normal mode — wheel over the sidebar is swallowed, no focus grab.
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 10, 10), frame);
+        assert_eq!(app.sidebar_sel, 0);
+        assert!(matches!(app.mode, InputMode::Normal));
+        app.enter_sidebar();
+        // Panel rows sit below the Projects block (y >= 3 for 1 project).
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 10, 10), frame);
+        assert_eq!(app.sidebar_sel, app.config.scroll_lines);
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 10, 10), frame);
+        assert_eq!(app.sidebar_sel, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wheel_over_project_rows_switches_project() {
+        let (mut app, dir) = files_app("wheelproj", 1);
+        app.projects
+            .push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.enter_sidebar();
+        let frame = Rect::new(0, 0, 80, 24);
+        // Row 2 = second project row (title row 0, rows 1..2 projects).
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 10, 1), frame);
+        assert_eq!(app.active_project, 1);
+        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Projects);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- mouse select + copy ----
@@ -1690,13 +1910,25 @@ mod tests {
             pane.parser.lock().unwrap().process(b"hello world\r\n");
         }
         let frame = Rect::new(0, 0, 80, 24);
-        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 26, 1), frame);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 26, 1),
+            frame,
+        );
         assert!(app.mouse_dragging);
         let sel = app.mouse_sel.as_ref().expect("press anchors a selection");
         assert_eq!(sel.anchor, Some((0, 1))); // abs row 0, col 1 ('e')
-        handle_mouse(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 30, 1), frame);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 30, 1),
+            frame,
+        );
         assert_eq!(app.mouse_sel.as_ref().unwrap().cursor, (0, 5));
-        handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 30, 1), frame);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), 30, 1),
+            frame,
+        );
         assert!(!app.mouse_dragging);
         assert!(app.mouse_sel.is_none(), "release clears the highlight");
         let (msg, _) = app.status_msg.as_ref().expect("yank flashes");
@@ -1708,9 +1940,20 @@ mod tests {
         let mut app = app_with_one_project();
         app.spawn_pane(None);
         let frame = Rect::new(0, 0, 80, 24);
-        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 30, 5), frame);
-        handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 30, 5), frame);
-        assert!(app.mouse_sel.is_none(), "same-cell release is a click, not a selection");
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 30, 5),
+            frame,
+        );
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), 30, 5),
+            frame,
+        );
+        assert!(
+            app.mouse_sel.is_none(),
+            "same-cell release is a click, not a selection"
+        );
         assert!(app.status_msg.is_none());
     }
 
@@ -1720,11 +1963,19 @@ mod tests {
         app.spawn_pane(None);
         let frame = Rect::new(0, 0, 80, 24);
         // Pane's left border column (x=24) is not content.
-        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 24, 5), frame);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 24, 5),
+            frame,
+        );
         assert!(app.mouse_sel.is_none());
         assert!(!app.mouse_dragging);
         // Sidebar content row — a UI click, not text.
-        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 5, 5), frame);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 5),
+            frame,
+        );
         assert!(app.mouse_sel.is_none());
     }
 
@@ -1734,8 +1985,16 @@ mod tests {
         app.spawn_pane(None);
         grow_scrollback(&app);
         let frame = Rect::new(0, 0, 80, 24);
-        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 30, 1), frame);
-        handle_mouse(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 30, 0), frame);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 30, 1),
+            frame,
+        );
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 30, 0),
+            frame,
+        );
         let off = pane_scrollback(&app);
         assert!(off > 0, "overshoot above the pane scrolled up");
         // The cursor tracked into scrollback: it's above the anchor row.
@@ -1750,14 +2009,32 @@ mod tests {
         {
             let pane = &app.active_project().unwrap().panes[0];
             // App enables mouse reporting + SGR encoding.
-            pane.parser.lock().unwrap().process(b"\x1b[?1000h\x1b[?1006h");
+            pane.parser
+                .lock()
+                .unwrap()
+                .process(b"\x1b[?1000h\x1b[?1006h");
         }
         let frame = Rect::new(0, 0, 80, 24);
-        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 30, 5), frame);
-        assert!(app.mouse_sel.is_none(), "no local selection for a reporting app");
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 30, 5),
+            frame,
+        );
+        assert!(
+            app.mouse_sel.is_none(),
+            "no local selection for a reporting app"
+        );
         assert!(app.mouse_app.is_some(), "press handed to the app");
-        handle_mouse(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 35, 6), frame);
-        handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 35, 6), frame);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 35, 6),
+            frame,
+        );
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), 35, 6),
+            frame,
+        );
         assert!(app.mouse_app.is_none(), "release ends app capture");
         assert!(app.status_msg.is_none(), "no copy flash");
     }
@@ -1768,7 +2045,10 @@ mod tests {
         app.spawn_pane(None);
         {
             let pane = &app.active_project().unwrap().panes[0];
-            pane.parser.lock().unwrap().process(b"\x1b[?1000h\x1b[?1006hshift me\r\n");
+            pane.parser
+                .lock()
+                .unwrap()
+                .process(b"\x1b[?1000h\x1b[?1006hshift me\r\n");
         }
         let frame = Rect::new(0, 0, 80, 24);
         let ev = |kind| MouseEvent {
@@ -1786,11 +2066,14 @@ mod tests {
     #[test]
     fn click_project_row_switches_but_keeps_terminal_focus() {
         let mut app = app_with_one_project();
-        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("second".into(), PathBuf::from("/tmp")));
         handle_mouse(&mut app, click_at(5, 2), frame80());
         assert_eq!(app.active_project, 1);
-        assert!(matches!(app.mode, InputMode::Normal),
-            "project click must not steal focus from the terminal");
+        assert!(
+            matches!(app.mode, InputMode::Normal),
+            "project click must not steal focus from the terminal"
+        );
 
         // Already navigating the sidebar → click stays in the flow and
         // focuses Projects, not Git.
@@ -1805,8 +2088,10 @@ mod tests {
     #[test]
     fn projects_focus_jk_switches_projects_live() {
         let mut app = app_with_one_project();
-        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
-        app.projects.push(Project::new("third".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("third".into(), PathBuf::from("/tmp")));
         app.enter_sidebar();
         app.sidebar_focus = crate::app::SidebarSection::Projects;
         handle_key(&mut app, key(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -1827,10 +2112,14 @@ mod tests {
     #[test]
     fn tab_flips_sidebar_focus_and_git_keys_stay_git() {
         let mut app = app_with_one_project();
-        app.projects.push(Project::new("second".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("second".into(), PathBuf::from("/tmp")));
         app.enter_sidebar();
-        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Panel,
-            "leader g enters at Git");
+        assert_eq!(
+            app.sidebar_focus,
+            crate::app::SidebarSection::Panel,
+            "leader g enters at Git"
+        );
         handle_key(&mut app, key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Projects);
         // j navigates projects while Projects-focused, not git rows.
@@ -1848,7 +2137,8 @@ mod tests {
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), root.clone()));
-        app.projects.push(Project::new("other".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("other".into(), PathBuf::from("/tmp")));
         app.spawn_pane(None);
         // Start Projects-focused, then click a git row — focus follows.
         app.enter_sidebar();
@@ -1865,13 +2155,31 @@ mod tests {
         let frame = Rect::new(0, 0, 80, 24);
         let fid = app.active_project().unwrap().top_float().unwrap().id;
         // Float interior: centered 90% of 80x23 → inner ~(5,2)..(75,20).
-        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 30, 10), frame);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 30, 10),
+            frame,
+        );
         let sel = app.mouse_sel.as_ref().expect("press inside float anchors");
-        assert_eq!(sel.pane_id, fid, "selection targets the float, not the grid");
+        assert_eq!(
+            sel.pane_id, fid,
+            "selection targets the float, not the grid"
+        );
         // Outside the float — modal swallow, no selection.
-        handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 30, 10), frame);
-        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 2, 2), frame);
-        assert!(app.mouse_sel.is_none(), "outside a modal float selects nothing");
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), 30, 10),
+            frame,
+        );
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 2),
+            frame,
+        );
+        assert!(
+            app.mouse_sel.is_none(),
+            "outside a modal float selects nothing"
+        );
     }
 
     #[test]
@@ -1884,20 +2192,42 @@ mod tests {
         }
         app.enter_copy();
         let frame = Rect::new(0, 0, 80, 24);
-        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 30, 1), frame);
-        assert!(matches!(app.mode, InputMode::Copy), "click stays in copy mode");
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 30, 1),
+            frame,
+        );
+        assert!(
+            matches!(app.mode, InputMode::Copy),
+            "click stays in copy mode"
+        );
         assert_eq!(app.copy.as_ref().unwrap().cursor, (0, 5));
         assert!(app.copy.as_ref().unwrap().anchor.is_none());
-        handle_mouse(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 34, 1), frame);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 34, 1),
+            frame,
+        );
         let copy = app.copy.as_ref().unwrap();
-        assert_eq!(copy.anchor, Some((0, 5)), "first drag anchors at pre-drag cursor");
+        assert_eq!(
+            copy.anchor,
+            Some((0, 5)),
+            "first drag anchors at pre-drag cursor"
+        );
         assert_eq!(copy.cursor, (0, 9));
     }
 
     fn pane_screen_contains(pane: &crate::pane::Pane, needle: &str, wait_ms: u64) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
         while std::time::Instant::now() < deadline {
-            if pane.parser.lock().unwrap().screen().contents().contains(needle) {
+            if pane
+                .parser
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains(needle)
+            {
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1912,7 +2242,8 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         (app, rx)
     }
 
@@ -1930,8 +2261,7 @@ mod tests {
     #[test]
     fn paste_bytes_wraps_only_when_pane_enabled_bracketed() {
         let (tx, _rx) = mpsc::channel();
-        let pane =
-            crate::pane::Pane::spawn(1, "t".into(), 24, 80, None, tx, None, 10_000).unwrap();
+        let pane = crate::pane::Pane::spawn(1, "t".into(), 24, 80, None, tx, None, 10_000).unwrap();
         // DECSET 2004 off by default → raw passthrough.
         assert_eq!(paste_bytes(&pane, "a\nb"), b"a\nb");
         pane.parser.lock().unwrap().process(b"\x1b[?2004h");
@@ -1948,7 +2278,10 @@ mod tests {
         app.line_input = Some(LineEdit::new());
         app.mode = InputMode::LineInput(LinePurpose::Search);
         handle_paste(&mut app, "alpha\r\nbeta\ngamma".into());
-        assert_eq!(app.line_input.as_ref().unwrap().as_str(), "alpha beta gamma");
+        assert_eq!(
+            app.line_input.as_ref().unwrap().as_str(),
+            "alpha beta gamma"
+        );
     }
 
     #[test]
@@ -1960,7 +2293,9 @@ mod tests {
         assert_eq!(app.palette.as_ref().unwrap().query, "qui t");
         app.palette = None;
 
-        app.finder = Some(crate::finder::FinderState::open(&app.active_root().unwrap()));
+        app.finder = Some(crate::finder::FinderState::open(
+            &app.active_root().unwrap(),
+        ));
         app.mode = InputMode::Finder;
         handle_paste(&mut app, "src\nmain".into());
         assert_eq!(app.finder.as_ref().unwrap().query, "src main");
