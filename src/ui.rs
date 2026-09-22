@@ -474,7 +474,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 )
             }
             InputMode::Leader => {
-                "n new  x close  h/l switch  z zoom  . flag  H hide  [ ] project  +/- split  :/p palette  c add  b side  g git  e files  G lazygit  L log  f find  / search  d detach  q quit"
+                "n new  x close  h/l switch  z zoom  . flag  H hide  [ ] project  +/- split  :/p palette  c add  b side  g git  e files  o term  G lazygit  L log  f find  / search  d detach  q quit"
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),

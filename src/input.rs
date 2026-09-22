@@ -530,6 +530,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 }
                 // exec'd: `q` in lazygit exits the shell → popup auto-closes.
                 KeyCode::Char('G') => app.spawn_float("lazygit", "exec lazygit"),
+                // Scratch terminal popup — quick command without touching
+                // the grid. Bare shell; exit/^D/leader+x closes it.
+                KeyCode::Char('o') => app.spawn_terminal_float(),
                 KeyCode::Char('L') => app.open_git_log(),
                 KeyCode::Char('H') => app.hide_active_pane(),
                 KeyCode::Char('z') => {
@@ -1855,6 +1858,22 @@ mod tests {
         assert!(!app.files_show_hidden);
         assert_eq!(file_names(&app), vec!["f00.txt", "f01.txt"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leader_o_spawns_scratch_terminal_float() {
+        let mut app = app_with_one_project();
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('o'), KeyModifiers::NONE));
+        let floats = &app.active_project().unwrap().floats;
+        assert_eq!(floats.len(), 1);
+        // Bare shell — no exec'd command, so exit/^D pops it via reap.
+        assert_eq!(floats[0].startup_command, None);
+        assert!(matches!(app.mode, InputMode::Normal), "leader consumed");
+        // leader+x closes it like any popup.
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.active_project().unwrap().floats.is_empty());
     }
 
     #[test]

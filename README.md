@@ -107,6 +107,7 @@ Everything hangs off the **leader key**, `Ctrl+A` by default.
 | `b` | Toggle sidebar |
 | `e` | Sidebar → Files panel |
 | `g` | Sidebar → Git panel |
+| `o` | Scratch terminal popup (quick command; `exit`/`C-a x` closes) |
 | `G` | lazygit popup |
 | `L` | `git log --graph` popup |
 | `f` | File finder → editor popup |

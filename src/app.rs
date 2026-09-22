@@ -401,6 +401,31 @@ impl App {
         }
     }
 
+    /// Leader `o` — a scratch terminal popup: a bare shell (no startup
+    /// command) in the project root. `exit`/`^D`/`leader+x` closes it;
+    /// the runloop auto-pops floats whose child died.
+    pub fn spawn_terminal_float(&mut self) {
+        let id = self.alloc_pane_id();
+        let events_tx = self.events_tx.clone();
+        let scrollback = self.config.scrollback;
+        if let Some(project) = self.active_project_mut() {
+            let cwd = project.root.clone();
+            match Pane::spawn(
+                id,
+                "term".to_string(),
+                24,
+                80,
+                Some(&cwd),
+                events_tx,
+                None,
+                scrollback,
+            ) {
+                Ok(pane) => project.floats.push(pane),
+                Err(e) => self.flash(format!("spawn failed: {e}")),
+            }
+        }
+    }
+
     /// Pop the top float (leader+x while a float is open). Floats skip
     /// the closed-pane history — a reopened popup would be a bare shell,
     /// not the tool. Returns false when no float was open.
