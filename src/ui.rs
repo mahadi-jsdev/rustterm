@@ -450,6 +450,16 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                         }
                     })
                     .unwrap_or("");
+                // Pane census — "▣2/4 zoom" keeps hidden/zoomed panes
+                // from being forgotten.
+                let census = app
+                    .active_project()
+                    .filter(|p| !p.panes.is_empty())
+                    .map(|p| {
+                        let zoom = if p.zoomed.is_some() { " zoom" } else { "" };
+                        format!("  ▣{}/{}", p.active_pane + 1, p.panes.len()) + zoom
+                    })
+                    .unwrap_or_default();
                 let hidden = app
                     .active_project()
                     .map(|p| p.panes.iter().filter(|p| p.hidden).count())
@@ -469,7 +479,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     String::new()
                 };
                 format!(
-                    "Ctrl+{} for commands{state}{bg}{fl}",
+                    "Ctrl+{} for commands{state}{census}{bg}{fl}",
                     app.config.leader_char.to_ascii_uppercase()
                 )
             }
@@ -735,6 +745,35 @@ mod tests {
         assert!(buffer_contains(buffer, "f00.txt"));
         assert_eq!(app.panel_scroll.get(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_bar_shows_pane_census_and_states() {
+        let (tx, atx) = two_channels();
+        let mut app = App::new(tx, atx);
+        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        app.spawn_pane(None);
+        // Pane 2 active + zoomed; pane 0 hidden; one float open.
+        app.active_project_mut().unwrap().panes[0].hidden = true;
+        app.active_project_mut().unwrap().active_pane = 1;
+        let id = app.active_project().unwrap().panes[1].id;
+        app.active_project_mut().unwrap().zoomed = Some(id);
+        app.spawn_float("pop", "exec true");
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let bar: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, buffer.area.height - 1)].symbol().to_string())
+            .collect();
+        assert!(bar.contains("▣2/3"), "pane index/total: {bar}");
+        assert!(bar.contains("zoom"), "zoomed marker: {bar}");
+        assert!(bar.contains("+1 hidden"), "hidden count: {bar}");
+        assert!(bar.contains("⬚1 popup"), "float count: {bar}");
     }
 
     /// All cells of row `y` joined — for substring checks on one row.
