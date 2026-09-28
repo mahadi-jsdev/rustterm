@@ -440,24 +440,17 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 let state = app
                     .active_project()
                     .and_then(|p| p.active_pane())
-                    .map(|p| {
-                        if p.waiting {
-                            "  ● waiting for input"
-                        } else if p.running {
-                            "  ▸ running"
-                        } else {
-                            ""
-                        }
-                    })
+                    .map(|p| if p.waiting { "  ● waiting for input" } else { "" })
                     .unwrap_or("");
-                // Pane census — "▣2/4 zoom" keeps hidden/zoomed panes
-                // from being forgotten.
+                // Pane census — "[2/4] zoom" keeps hidden/zoomed panes
+                // from being forgotten. ASCII brackets: box glyphs like
+                // ▣/⬚ are missing from common terminal fonts.
                 let census = app
                     .active_project()
                     .filter(|p| !p.panes.is_empty())
                     .map(|p| {
                         let zoom = if p.zoomed.is_some() { " zoom" } else { "" };
-                        format!("  ▣{}/{}", p.active_pane + 1, p.panes.len()) + zoom
+                        format!("  [{}/{}]", p.active_pane + 1, p.panes.len()) + zoom
                     })
                     .unwrap_or_default();
                 let hidden = app
@@ -474,7 +467,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     .map(|p| p.floats.len())
                     .unwrap_or(0);
                 let fl = if floats > 0 {
-                    format!("  ⬚{floats} popup")
+                    format!("  [{floats} popup]")
                 } else {
                     String::new()
                 };
@@ -770,10 +763,10 @@ mod tests {
         let bar: String = (0..buffer.area.width)
             .map(|x| buffer[(x, buffer.area.height - 1)].symbol().to_string())
             .collect();
-        assert!(bar.contains("▣2/3"), "pane index/total: {bar}");
+        assert!(bar.contains("[2/3]"), "pane index/total: {bar}");
         assert!(bar.contains("zoom"), "zoomed marker: {bar}");
         assert!(bar.contains("+1 hidden"), "hidden count: {bar}");
-        assert!(bar.contains("⬚1 popup"), "float count: {bar}");
+        assert!(bar.contains("[1 popup]"), "float count: {bar}");
     }
 
     /// All cells of row `y` joined — for substring checks on one row.

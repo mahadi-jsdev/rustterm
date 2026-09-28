@@ -16,7 +16,7 @@ all in one binary, no Electron, no daemon required until you want one.
 │ ? src/new.rs       ││                     ││                     │
 │                    ││                     ││                     │
 └────────────────────┘└─────────────────────┘└─────────────────────┘
-Ctrl+A for commands   ▸ running   ⬚1 popup
+Ctrl+A for commands   [2/2] zoom   +1 hidden   [1 popup]
 ```
 
 ## Features
