@@ -102,7 +102,7 @@ Everything hangs off the **leader key**, `Ctrl+A` by default.
 | `z` | Zoom pane to fill the grid (toggle) |
 | `.` | Jump to next waiting/attention pane |
 | `H` | Background (hide) pane — reopen via palette |
-| `[` / `]` | Previous / next project |
+| `[` / `]` / `s` | Previous / next project (`s` cycles forward) |
 | `+` / `-` | Adjust the split |
 | `:` or `p` | Command palette |
 | `c` | Add project… |

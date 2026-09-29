@@ -491,7 +491,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     }
                 }
                 KeyCode::Char('[') => app.prev_project(),
-                KeyCode::Char(']') => app.next_project(),
+                KeyCode::Char(']') | KeyCode::Char('s') => app.next_project(),
                 KeyCode::Char('+') => app.adjust_split(0.05),
                 KeyCode::Char('-') => app.adjust_split(-0.05),
                 KeyCode::Char(':') | KeyCode::Char('p') => {
@@ -541,7 +541,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             }
             // Project switch lands on ensure-pane.
-            if matches!(key.code, KeyCode::Char('[') | KeyCode::Char(']')) {
+            if matches!(
+                key.code,
+                KeyCode::Char('[') | KeyCode::Char(']') | KeyCode::Char('s')
+            ) {
                 app.ensure_active_pane();
             }
         }
