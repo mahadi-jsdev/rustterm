@@ -108,8 +108,8 @@ fn find_pane_mut(app: &mut App, pane_id: PaneId) -> Option<&mut Pane> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::Project;
     use crate::pane::Pane;
+    use crate::project::Project;
     use std::path::PathBuf;
     use std::sync::mpsc;
 
@@ -144,14 +144,24 @@ mod tests {
     #[test]
     fn done_event_sets_attention() {
         let (mut app, id) = app_with_pane();
-        dispatch(&mut app, id, WatchEvent::Done { command: "claude".into() });
+        dispatch(
+            &mut app,
+            id,
+            WatchEvent::Done {
+                command: "claude".into(),
+            },
+        );
         assert!(app.projects[0].panes[0].attention);
     }
 
     #[test]
     fn command_event_auto_tags_default_pane() {
         let (mut app, id) = app_with_pane();
-        dispatch(&mut app, id, WatchEvent::Command("claude --continue".into()));
+        dispatch(
+            &mut app,
+            id,
+            WatchEvent::Command("claude --continue".into()),
+        );
         let pane = &app.projects[0].panes[0];
         assert_eq!(pane.title, "claude");
         assert!(pane.agent_tagged);

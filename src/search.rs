@@ -21,7 +21,11 @@ impl SearchState {
 
     pub fn prev(&mut self) {
         if !self.matches.is_empty() {
-            self.idx = if self.idx == 0 { self.matches.len() - 1 } else { self.idx - 1 };
+            self.idx = if self.idx == 0 {
+                self.matches.len() - 1
+            } else {
+                self.idx - 1
+            };
         }
     }
 
@@ -47,8 +51,8 @@ pub(crate) fn grid_lines(screen: &mut vt100::Screen) -> Vec<String> {
     while top < s + h {
         screen.set_scrollback(s.saturating_sub(top));
         let base = s - screen.scrollback(); // actual viewport top after clamping
-        // `rows()` yields exactly h Strings — one per visible grid row,
-        // unmerged (unlike `contents()`, which joins wrapped rows).
+                                            // `rows()` yields exactly h Strings — one per visible grid row,
+                                            // unmerged (unlike `contents()`, which joins wrapped rows).
         for (i, l) in screen.rows(0, screen.size().1).enumerate() {
             let r = base + i;
             if r >= rows.len() && r < s + h {
@@ -86,7 +90,11 @@ pub fn find_matches(screen: &mut vt100::Screen, query: &str) -> Vec<SearchMatch>
             let lower = line.to_lowercase();
             lower
                 .match_indices(q.as_str())
-                .map(move |(col, _)| SearchMatch { row, col, len: query.len() })
+                .map(move |(col, _)| SearchMatch {
+                    row,
+                    col,
+                    len: query.len(),
+                })
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -211,9 +219,21 @@ mod tests {
         let mut s = SearchState {
             query: "x".into(),
             matches: vec![
-                SearchMatch { row: 0, col: 0, len: 1 },
-                SearchMatch { row: 1, col: 0, len: 1 },
-                SearchMatch { row: 2, col: 0, len: 1 },
+                SearchMatch {
+                    row: 0,
+                    col: 0,
+                    len: 1,
+                },
+                SearchMatch {
+                    row: 1,
+                    col: 0,
+                    len: 1,
+                },
+                SearchMatch {
+                    row: 2,
+                    col: 0,
+                    len: 1,
+                },
             ],
             idx: 2,
         };

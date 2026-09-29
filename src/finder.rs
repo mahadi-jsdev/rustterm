@@ -24,7 +24,10 @@ pub fn build(root: &Path) -> FileIndex {
         }
     }
     files.sort();
-    FileIndex { root: root.to_path_buf(), files }
+    FileIndex {
+        root: root.to_path_buf(),
+        files,
+    }
 }
 
 /// Fuzzy-filter relative paths, best score first, top MAX_RESULTS.
@@ -38,7 +41,11 @@ pub fn filter<'a>(index: &'a FileIndex, query: &str) -> Vec<&'a Path> {
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.into_iter().take(MAX_RESULTS).map(|(_, p)| p).collect()
+    scored
+        .into_iter()
+        .take(MAX_RESULTS)
+        .map(|(_, p)| p)
+        .collect()
 }
 
 /// Finder UI state — same shape as `palette::Palette`.
@@ -50,7 +57,11 @@ pub struct FinderState {
 
 impl FinderState {
     pub fn open(root: &Path) -> FinderState {
-        FinderState { index: build(root), query: String::new(), selected: 0 }
+        FinderState {
+            index: build(root),
+            query: String::new(),
+            selected: 0,
+        }
     }
 
     pub fn filtered(&self) -> Vec<&Path> {
@@ -72,7 +83,11 @@ impl FinderState {
     pub fn move_prev(&mut self) {
         let n = self.filtered().len();
         if n > 0 {
-            self.selected = if self.selected == 0 { n - 1 } else { self.selected - 1 };
+            self.selected = if self.selected == 0 {
+                n - 1
+            } else {
+                self.selected - 1
+            };
         }
     }
 
@@ -108,12 +123,23 @@ mod tests {
     fn build_skips_gitignored_hidden_and_dotgit() {
         let root = tree("build");
         // .gitignore only applies inside a git repo — init one.
-        std::process::Command::new("git").arg("-C").arg(&root).args(["init", "-q"]).output().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
         let idx = build(&root);
-        let names: Vec<String> = idx.files.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        let names: Vec<String> = idx
+            .files
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
         assert!(names.contains(&"src/main.rs".into()));
         assert!(!names.iter().any(|n| n.contains("ignored.log")));
-        assert!(!names.iter().any(|n| n.starts_with(".git") || n.contains(".git/")));
+        assert!(!names
+            .iter()
+            .any(|n| n.starts_with(".git") || n.contains(".git/")));
         assert!(!names.contains(&".hidden".to_string()));
         std::fs::remove_dir_all(&root).unwrap();
     }

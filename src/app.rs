@@ -110,6 +110,11 @@ pub struct App {
     /// reporting and Shift wasn't held, so press/drag/release forward
     /// to the PTY instead of selecting.
     pub mouse_app: Option<PaneId>,
+    /// Two-stage close: `leader+x` on a busy pane (foreground job owns
+    /// the tty) arms instead of closing; a second press on the same
+    /// pane within the arm window closes for real. Guards the z/x
+    /// fat-finger: an accidental close on a busy pane is a no-op.
+    pub close_armed: Option<(PaneId, Instant)>,
     /// ~/.config/rustterm/config.toml — loaded in main, defaults here
     /// so tests never read the user's real config.
     pub config: crate::config::Config,
@@ -159,6 +164,7 @@ impl App {
             mouse_sel: None,
             mouse_dragging: false,
             mouse_app: None,
+            close_armed: None,
             config: crate::config::Config::default(),
         }
     }
@@ -423,6 +429,36 @@ impl App {
             }
         }
         false
+    }
+
+    /// leader+x / palette Close — the destructive path goes through a
+    /// two-stage guard: a busy pane (foreground job owns the tty) arms
+    /// on the first press and only closes on a second press within
+    /// CLOSE_ARM_WINDOW. Idle shells and dead panes close instantly.
+    pub fn request_close(&mut self) {
+        const CLOSE_ARM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+        let Some(project) = self.active_project() else {
+            return;
+        };
+        // Same target rule as close_float-or-pane: the top float wins.
+        let (target, busy) = project
+            .top_float()
+            .or_else(|| project.active_pane())
+            .map(|p| (p.id, p.busy()))
+            .unwrap_or((u32::MAX, false));
+        let armed = matches!(
+            self.close_armed,
+            Some((id, t)) if id == target && t.elapsed() < CLOSE_ARM_WINDOW
+        );
+        if busy && !armed {
+            self.close_armed = Some((target, Instant::now()));
+            self.flash("job running — C-a x again to close");
+            return;
+        }
+        self.close_armed = None;
+        if !self.close_float() {
+            self.close_active_pane();
+        }
     }
 
     /// Post-fork keeper setup: reader threads died at fork, so each
@@ -1270,6 +1306,95 @@ mod tests {
         assert_eq!(app.projects.len(), 1);
         assert_eq!(app.projects[0].name, "a");
         assert_eq!(app.active_project, 0);
+    }
+
+    /// Busy panes need `fg pgrp != shell pid` — a `sleep` job must own
+    /// the terminal. Job control handoff is async, so poll briefly.
+    fn wait_for_busy(pane_id_wait: PaneId, want: bool, app: &App) -> bool {
+        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+        while Instant::now() < deadline {
+            let busy = app
+                .projects
+                .iter()
+                .flat_map(|p| p.panes.iter().chain(p.floats.iter()))
+                .find(|p| p.id == pane_id_wait)
+                .map(|p| p.busy())
+                .unwrap_or(false);
+            if busy == want {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        false
+    }
+
+    #[test]
+    fn close_on_idle_shell_is_instant() {
+        let mut app = app_with_projects(&["demo"]);
+        app.spawn_pane(None);
+        let id = app.active_project().unwrap().panes[0].id;
+        assert!(
+            wait_for_busy(id, false, &app),
+            "fresh shell never reported idle (fg pgrp == shell)"
+        );
+        app.request_close();
+        assert!(
+            app.active_project().unwrap().panes.is_empty(),
+            "idle pane should close on the first press"
+        );
+        assert!(app.close_armed.is_none());
+    }
+
+    #[test]
+    fn close_on_busy_pane_needs_two_presses() {
+        let mut app = app_with_projects(&["demo"]);
+        app.spawn_pane(None);
+        let id = app.active_project().unwrap().panes[0].id;
+        app.active_project().unwrap().panes[0]
+            .write_input(b"sleep 30\n")
+            .unwrap();
+        assert!(
+            wait_for_busy(id, true, &app),
+            "sleep job never took the foreground pgrp"
+        );
+
+        app.request_close();
+        assert_eq!(
+            app.active_project().unwrap().panes.len(),
+            1,
+            "busy pane survives the first press"
+        );
+        assert_eq!(app.close_armed.map(|(i, _)| i), Some(id));
+        assert!(app.status_msg.is_some(), "guard should explain itself");
+
+        app.request_close();
+        assert!(
+            app.active_project().unwrap().panes.is_empty(),
+            "armed confirm closes the busy pane"
+        );
+        assert!(app.close_armed.is_none());
+    }
+
+    #[test]
+    fn close_arm_expires_and_requires_repress() {
+        let mut app = app_with_projects(&["demo"]);
+        app.spawn_pane(None);
+        let id = app.active_project().unwrap().panes[0].id;
+        app.active_project().unwrap().panes[0]
+            .write_input(b"sleep 30\n")
+            .unwrap();
+        assert!(wait_for_busy(id, true, &app));
+
+        app.request_close();
+        assert!(app.close_armed.is_some());
+        // Forge an expired arm — real expiry needs the window to pass.
+        app.close_armed = Some((id, Instant::now() - std::time::Duration::from_secs(5)));
+        app.request_close();
+        assert_eq!(
+            app.active_project().unwrap().panes.len(),
+            1,
+            "stale arm re-warns instead of closing"
+        );
     }
 
     #[test]

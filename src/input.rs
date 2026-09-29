@@ -474,12 +474,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             match key.code {
                 KeyCode::Char('q') => app.should_quit = true,
                 KeyCode::Char('n') => app.spawn_pane(None),
-                // Floats pop first — the popup is the obvious close target.
-                KeyCode::Char('x') => {
-                    if !app.close_float() {
-                        app.close_active_pane();
-                    }
-                }
+                // Floats pop first — the popup is the obvious close
+                // target. Busy panes take two presses (see request_close).
+                KeyCode::Char('x') => app.request_close(),
                 KeyCode::Left | KeyCode::Char('h') => {
                     if let Some(p) = app.active_project_mut() {
                         p.prev_pane();

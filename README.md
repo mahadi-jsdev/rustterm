@@ -97,7 +97,7 @@ Everything hangs off the **leader key**, `Ctrl+A` by default.
 | Key | Action |
 |-----|--------|
 | `n` | New pane |
-| `x` | Close popup, else close active pane |
+| `x` | Close popup, else close active pane (a pane with a foreground job needs a second `x` to confirm) |
 | `h` / `l` / arrows | Switch pane |
 | `z` | Zoom pane to fill the grid (toggle) |
 | `.` | Jump to next waiting/attention pane |

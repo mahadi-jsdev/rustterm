@@ -86,7 +86,11 @@ fn tilde_key(n: u8, mods: KeyModifiers) -> Vec<u8> {
 fn f_key(n: u8) -> Vec<u8> {
     match n {
         1..=4 => vec![0x1b, b'O', b'P' + (n - 1)],
-        5..=12 => format!("\x1b[{}~", [15, 17, 18, 19, 20, 21, 23, 24][(n - 5) as usize]).into_bytes(),
+        5..=12 => format!(
+            "\x1b[{}~",
+            [15, 17, 18, 19, 20, 21, 23, 24][(n - 5) as usize]
+        )
+        .into_bytes(),
         _ => Vec::new(),
     }
 }
@@ -101,12 +105,18 @@ mod tests {
 
     #[test]
     fn plain_char_passes_through_as_utf8() {
-        assert_eq!(key_event_to_bytes(key(KeyCode::Char('a'), KeyModifiers::NONE)), b"a".to_vec());
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            b"a".to_vec()
+        );
     }
 
     #[test]
     fn ctrl_c_becomes_control_byte_3() {
-        assert_eq!(key_event_to_bytes(key(KeyCode::Char('c'), KeyModifiers::CONTROL)), vec![3u8]);
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            vec![3u8]
+        );
     }
 
     #[test]
@@ -119,12 +129,18 @@ mod tests {
 
     #[test]
     fn enter_becomes_carriage_return() {
-        assert_eq!(key_event_to_bytes(key(KeyCode::Enter, KeyModifiers::NONE)), vec![b'\r']);
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Enter, KeyModifiers::NONE)),
+            vec![b'\r']
+        );
     }
 
     #[test]
     fn backspace_becomes_del_byte() {
-        assert_eq!(key_event_to_bytes(key(KeyCode::Backspace, KeyModifiers::NONE)), vec![0x7f]);
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Backspace, KeyModifiers::NONE)),
+            vec![0x7f]
+        );
     }
 
     #[test]
@@ -137,10 +153,22 @@ mod tests {
 
     #[test]
     fn arrow_keys_become_ansi_escape_sequences() {
-        assert_eq!(key_event_to_bytes(key(KeyCode::Up, KeyModifiers::NONE)), b"\x1b[A".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::Down, KeyModifiers::NONE)), b"\x1b[B".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::Right, KeyModifiers::NONE)), b"\x1b[C".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::Left, KeyModifiers::NONE)), b"\x1b[D".to_vec());
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Up, KeyModifiers::NONE)),
+            b"\x1b[A".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Down, KeyModifiers::NONE)),
+            b"\x1b[B".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Right, KeyModifiers::NONE)),
+            b"\x1b[C".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Left, KeyModifiers::NONE)),
+            b"\x1b[D".to_vec()
+        );
     }
 
     #[test]
@@ -157,12 +185,30 @@ mod tests {
 
     #[test]
     fn navigation_keys_become_xterm_sequences() {
-        assert_eq!(key_event_to_bytes(key(KeyCode::Home, KeyModifiers::NONE)), b"\x1b[H".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::End, KeyModifiers::NONE)), b"\x1b[F".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::Insert, KeyModifiers::NONE)), b"\x1b[2~".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::Delete, KeyModifiers::NONE)), b"\x1b[3~".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::PageUp, KeyModifiers::NONE)), b"\x1b[5~".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::PageDown, KeyModifiers::NONE)), b"\x1b[6~".to_vec());
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Home, KeyModifiers::NONE)),
+            b"\x1b[H".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::End, KeyModifiers::NONE)),
+            b"\x1b[F".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Insert, KeyModifiers::NONE)),
+            b"\x1b[2~".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::Delete, KeyModifiers::NONE)),
+            b"\x1b[3~".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::PageUp, KeyModifiers::NONE)),
+            b"\x1b[5~".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::PageDown, KeyModifiers::NONE)),
+            b"\x1b[6~".to_vec()
+        );
         assert_eq!(
             key_event_to_bytes(key(KeyCode::Home, KeyModifiers::CONTROL)),
             b"\x1b[1;5H".to_vec()
@@ -175,9 +221,21 @@ mod tests {
 
     #[test]
     fn f_keys_become_xterm_sequences() {
-        assert_eq!(key_event_to_bytes(key(KeyCode::F(1), KeyModifiers::NONE)), b"\x1bOP".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::F(4), KeyModifiers::NONE)), b"\x1bOS".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::F(5), KeyModifiers::NONE)), b"\x1b[15~".to_vec());
-        assert_eq!(key_event_to_bytes(key(KeyCode::F(12), KeyModifiers::NONE)), b"\x1b[24~".to_vec());
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::F(1), KeyModifiers::NONE)),
+            b"\x1bOP".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::F(4), KeyModifiers::NONE)),
+            b"\x1bOS".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::F(5), KeyModifiers::NONE)),
+            b"\x1b[15~".to_vec()
+        );
+        assert_eq!(
+            key_event_to_bytes(key(KeyCode::F(12), KeyModifiers::NONE)),
+            b"\x1b[24~".to_vec()
+        );
     }
 }

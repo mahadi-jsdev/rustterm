@@ -21,13 +21,20 @@ pub fn extract(lines: &[String], a: (usize, usize), b: (usize, usize)) -> String
     let (r0, c0) = a;
     let (r1, c1) = b;
     let row_chars = |r: usize| -> Vec<char> {
-        lines.get(r).map(|l| l.chars().collect()).unwrap_or_default()
+        lines
+            .get(r)
+            .map(|l| l.chars().collect())
+            .unwrap_or_default()
     };
     let mut out = String::new();
     for r in r0..=r1 {
         let chars = row_chars(r);
         let from = if r == r0 { c0.min(chars.len()) } else { 0 };
-        let to = if r == r1 { (c1 + 1).min(chars.len()) } else { chars.len() };
+        let to = if r == r1 {
+            (c1 + 1).min(chars.len())
+        } else {
+            chars.len()
+        };
         if from < to {
             if !out.is_empty() {
                 out.push('\n');
@@ -42,21 +49,29 @@ pub fn extract(lines: &[String], a: (usize, usize), b: (usize, usize)) -> String
 
 /// Single grid line under the cursor, trimmed — the no-selection yank.
 pub fn extract_line(lines: &[String], row: usize) -> String {
-    lines.get(row).map(|l| l.trim_end().to_string()).unwrap_or_default()
+    lines
+        .get(row)
+        .map(|l| l.trim_end().to_string())
+        .unwrap_or_default()
 }
 
 fn b64(data: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let n = chunk
-            .iter()
-            .fold(0u32, |acc, &b| (acc << 8) | b as u32)
-            << (8 * (3 - chunk.len()));
+        let n = chunk.iter().fold(0u32, |acc, &b| (acc << 8) | b as u32) << (8 * (3 - chunk.len()));
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }

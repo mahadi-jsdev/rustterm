@@ -15,7 +15,9 @@ pub fn generate_message(diff: &str, api_key: &str) -> Result<String, String> {
         .set("Authorization", &format!("Bearer {api_key}"))
         .send_json(body)
         .map_err(|e| format!("openai: {e}"))?;
-    let text = resp.into_string().map_err(|e| format!("openai read: {e}"))?;
+    let text = resp
+        .into_string()
+        .map_err(|e| format!("openai read: {e}"))?;
     parse_response(&text)
 }
 

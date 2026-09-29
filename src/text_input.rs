@@ -17,11 +17,19 @@ pub struct LineEdit {
 
 impl LineEdit {
     pub fn new() -> LineEdit {
-        LineEdit { buf: String::new(), error: None, suggestions: Vec::new() }
+        LineEdit {
+            buf: String::new(),
+            error: None,
+            suggestions: Vec::new(),
+        }
     }
 
     pub fn from_str(s: &str) -> LineEdit {
-        LineEdit { buf: s.to_string(), error: None, suggestions: Vec::new() }
+        LineEdit {
+            buf: s.to_string(),
+            error: None,
+            suggestions: Vec::new(),
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -97,7 +105,10 @@ mod tests {
             _ => panic!("expected Submit"),
         }
         let mut e = LineEdit::new();
-        assert!(matches!(e.handle_key(key(KeyCode::Esc)), EditResult::Cancel));
+        assert!(matches!(
+            e.handle_key(key(KeyCode::Esc)),
+            EditResult::Cancel
+        ));
     }
 
     #[test]

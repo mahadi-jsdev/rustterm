@@ -38,11 +38,26 @@ pub struct Palette {
 impl Palette {
     pub fn open(app: &App) -> Palette {
         let mut items: Vec<Command> = Vec::new();
-        items.push(Command { id: CmdId::NewPane, label: "New pane".into() });
-        items.push(Command { id: CmdId::ClosePane, label: "Close pane".into() });
-        items.push(Command { id: CmdId::NextPane, label: "Next pane".into() });
-        items.push(Command { id: CmdId::PrevPane, label: "Previous pane".into() });
-        items.push(Command { id: CmdId::HidePane, label: "Hide pane (background)".into() });
+        items.push(Command {
+            id: CmdId::NewPane,
+            label: "New pane".into(),
+        });
+        items.push(Command {
+            id: CmdId::ClosePane,
+            label: "Close pane".into(),
+        });
+        items.push(Command {
+            id: CmdId::NextPane,
+            label: "Next pane".into(),
+        });
+        items.push(Command {
+            id: CmdId::PrevPane,
+            label: "Previous pane".into(),
+        });
+        items.push(Command {
+            id: CmdId::HidePane,
+            label: "Hide pane (background)".into(),
+        });
         if let Some(project) = app.active_project() {
             for (i, pane) in project.panes.iter().enumerate() {
                 if pane.hidden {
@@ -58,17 +73,32 @@ impl Palette {
                 }
             }
         }
-        items.push(Command { id: CmdId::IncSplit, label: "Increase split".into() });
-        items.push(Command { id: CmdId::DecSplit, label: "Decrease split".into() });
-        items.push(Command { id: CmdId::AddProject, label: "Add project…".into() });
-        items.push(Command { id: CmdId::AiCommit, label: "Git: AI commit".into() });
+        items.push(Command {
+            id: CmdId::IncSplit,
+            label: "Increase split".into(),
+        });
+        items.push(Command {
+            id: CmdId::DecSplit,
+            label: "Decrease split".into(),
+        });
+        items.push(Command {
+            id: CmdId::AddProject,
+            label: "Add project…".into(),
+        });
+        items.push(Command {
+            id: CmdId::AiCommit,
+            label: "Git: AI commit".into(),
+        });
         for (i, project) in app.projects.iter().enumerate() {
             items.push(Command {
                 id: CmdId::SwitchProject(i),
                 label: format!("Switch to project: {}", project.name),
             });
         }
-        items.push(Command { id: CmdId::CloseProject, label: "Close project".into() });
+        items.push(Command {
+            id: CmdId::CloseProject,
+            label: "Close project".into(),
+        });
         if !app.closed_panes.is_empty() {
             items.push(Command {
                 id: CmdId::ReopenPane,
@@ -81,10 +111,23 @@ impl Palette {
                 label: format!("Run {}", spec.name),
             });
         }
-        items.push(Command { id: CmdId::RenamePane, label: "Rename pane…".into() });
-        items.push(Command { id: CmdId::Detach, label: "Detach session (rustterm -a to reattach)".into() });
-        items.push(Command { id: CmdId::Quit, label: "Quit".into() });
-        Palette { query: String::new(), selected: 0, items }
+        items.push(Command {
+            id: CmdId::RenamePane,
+            label: "Rename pane…".into(),
+        });
+        items.push(Command {
+            id: CmdId::Detach,
+            label: "Detach session (rustterm -a to reattach)".into(),
+        });
+        items.push(Command {
+            id: CmdId::Quit,
+            label: "Quit".into(),
+        });
+        Palette {
+            query: String::new(),
+            selected: 0,
+            items,
+        }
     }
 
     pub fn set_query(&mut self, q: String) {
@@ -112,7 +155,11 @@ impl Palette {
     pub fn move_prev(&mut self) {
         let n = self.filtered().len();
         if n > 0 {
-            self.selected = if self.selected == 0 { n - 1 } else { self.selected - 1 };
+            self.selected = if self.selected == 0 {
+                n - 1
+            } else {
+                self.selected - 1
+            };
         }
     }
 
@@ -163,7 +210,7 @@ pub fn fuzzy_score(query: &str, target: &str) -> Option<f64> {
 pub fn execute(app: &mut App, id: &CmdId) {
     match id {
         CmdId::NewPane => app.spawn_pane(None),
-        CmdId::ClosePane => app.close_active_pane(),
+        CmdId::ClosePane => app.request_close(),
         CmdId::NextPane => {
             if let Some(p) = app.active_project_mut() {
                 p.next_pane();
@@ -226,7 +273,8 @@ mod tests {
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
         for n in names {
-            app.projects.push(Project::new((*n).into(), PathBuf::from("/tmp")));
+            app.projects
+                .push(Project::new((*n).into(), PathBuf::from("/tmp")));
         }
         app
     }
@@ -314,10 +362,19 @@ mod tests {
 
         let p = Palette::open(&app);
         let ids: Vec<&CmdId> = p.items.iter().map(|c| &c.id).collect();
-        assert!(ids.contains(&&CmdId::JumpPane(0)), "visible pane is a jump target");
+        assert!(
+            ids.contains(&&CmdId::JumpPane(0)),
+            "visible pane is a jump target"
+        );
         assert!(ids.contains(&&CmdId::JumpPane(2)));
-        assert!(ids.contains(&&CmdId::UnhidePane(1)), "hidden pane is an unhide target");
-        assert!(!ids.contains(&&CmdId::JumpPane(1)), "hidden pane is not jumpable");
+        assert!(
+            ids.contains(&&CmdId::UnhidePane(1)),
+            "hidden pane is an unhide target"
+        );
+        assert!(
+            !ids.contains(&&CmdId::JumpPane(1)),
+            "hidden pane is not jumpable"
+        );
         let label = p
             .items
             .iter()

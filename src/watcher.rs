@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn backspace_and_ctrl_c_edit_the_input_line() {
         let mut w = Watcher::new();
-        w.on_input(b"ab\x7fc");           // "ac"
+        w.on_input(b"ab\x7fc"); // "ac"
         let events = w.on_input(b"\x03ignored\r"); // ctrl-C clears, then a fresh line
         assert_eq!(events, vec![WatchEvent::Command("ignored".to_string())]);
     }
@@ -331,7 +331,12 @@ mod tests {
         assert!(w.update(t(11_000), "ab").is_empty());
         // 8s of quiet after last change at t=11s
         let events = w.update(t(19_100), "ab");
-        assert_eq!(events, vec![WatchEvent::Done { command: "claude".to_string() }]);
+        assert_eq!(
+            events,
+            vec![WatchEvent::Done {
+                command: "claude".to_string()
+            }]
+        );
     }
 
     #[test]

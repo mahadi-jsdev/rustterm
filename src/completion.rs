@@ -79,7 +79,8 @@ mod tests {
 
     // Unique per test — tests run in parallel and each deletes its fixture.
     fn fixture(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("rustterm-compl-{tag}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("rustterm-compl-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for d in ["alpha", "alpine", "beta/sub", ".hidden"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
@@ -100,7 +101,10 @@ mod tests {
     fn hidden_dirs_only_match_when_tail_is_dotted() {
         let root = fixture("hidden");
         assert!(!dir_candidates(&format!("{}/", root.display())).contains(&".hidden".to_string()));
-        assert_eq!(dir_candidates(&format!("{}/.", root.display())), vec![".hidden"]);
+        assert_eq!(
+            dir_candidates(&format!("{}/.", root.display())),
+            vec![".hidden"]
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -144,7 +148,13 @@ mod tests {
         }
         let marker = PathBuf::from(&home).join(format!("rustterm-compl-{}", std::process::id()));
         std::fs::create_dir_all(marker.join("xyz")).unwrap();
-        assert_eq!(dir_candidates(&format!("~/{}/x", marker.file_name().unwrap().to_string_lossy())), vec!["xyz"]);
+        assert_eq!(
+            dir_candidates(&format!(
+                "~/{}/x",
+                marker.file_name().unwrap().to_string_lossy()
+            )),
+            vec!["xyz"]
+        );
         std::fs::remove_dir_all(&marker).unwrap();
     }
 }

@@ -1,4 +1,4 @@
-use portable_pty::{Child, MasterPty, native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};

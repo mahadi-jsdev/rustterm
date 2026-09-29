@@ -68,9 +68,9 @@ impl Pane {
             title,
             parser,
             status: PaneStatus::Running,
-            cwd: cwd.map(|p| p.to_path_buf()).unwrap_or_else(|| {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-            }),
+            cwd: cwd
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
             color: None,
             agent_tagged: false,
             running: false,
@@ -162,7 +162,11 @@ impl Pane {
         if self.parser.lock().unwrap().screen().size() == (rows, cols) {
             return Ok(());
         }
-        self.parser.lock().unwrap().screen_mut().set_size(rows, cols);
+        self.parser
+            .lock()
+            .unwrap()
+            .screen_mut()
+            .set_size(rows, cols);
         self.master.resize(portable_pty::PtySize {
             rows,
             cols,
@@ -181,6 +185,16 @@ impl Pane {
         }
     }
 
+    /// Whether a foreground job (not the shell) owns the PTY: the tty's
+    /// foreground process group differs from the shell's pid. `sleep`,
+    /// `cargo build`, an agent thinking, `ssh`, vim — anything with job
+    /// control — reports busy even while quiet. Unknown → false.
+    pub fn busy(&self) -> bool {
+        let fg = self.master.process_group_leader();
+        let shell = self.child.process_id().map(|p| p as i32);
+        matches!(fg, Some(fg) if Some(fg) != shell)
+    }
+
     /// Best-effort: a failed kill() must NOT skip wait() — the early `?`
     /// used to leave the child unreaped (zombie) on error.
     pub fn kill(&mut self) -> anyhow::Result<()> {
@@ -194,7 +208,11 @@ impl Pane {
     pub fn reap(&mut self) {
         if matches!(self.status, PaneStatus::Running) {
             // portable_pty::ExitStatus::exit_code() -> u32; -1 when wait fails.
-            let code = self.child.wait().map(|s| s.exit_code() as i32).unwrap_or(-1);
+            let code = self
+                .child
+                .wait()
+                .map(|s| s.exit_code() as i32)
+                .unwrap_or(-1);
             self.status = PaneStatus::Exited(code);
         }
     }
@@ -266,7 +284,12 @@ mod tests {
         let pane = Pane::spawn(1, "test".into(), 24, 80, None, tx, None, 10_000).unwrap();
         pane.write_input(b"echo rustterm-pane-ok\n").unwrap();
         assert!(
-            drain_until(&rx, &pane.parser, "rustterm-pane-ok", Duration::from_secs(3)),
+            drain_until(
+                &rx,
+                &pane.parser,
+                "rustterm-pane-ok",
+                Duration::from_secs(3)
+            ),
             "expected 'rustterm-pane-ok' to appear in the parsed screen"
         );
     }
@@ -310,10 +333,18 @@ mod tests {
         )
         .unwrap();
         assert!(
-            drain_until(&rx, &pane.parser, "rustterm-startup-ok", Duration::from_secs(3)),
+            drain_until(
+                &rx,
+                &pane.parser,
+                "rustterm-startup-ok",
+                Duration::from_secs(3)
+            ),
             "expected startup command output on screen"
         );
-        assert_eq!(pane.startup_command.as_deref(), Some("echo rustterm-startup-ok"));
+        assert_eq!(
+            pane.startup_command.as_deref(),
+            Some("echo rustterm-startup-ok")
+        );
     }
 
     #[test]
