@@ -8,17 +8,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
 
-/// Which sidebar section owns keyboard focus in Sidebar mode —
-/// Projects (the picker) or the bottom Panel (files/git ops).
-/// Tab flips it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SidebarSection {
-    Projects,
-    Panel,
-}
-
-/// What the sidebar's bottom Panel shows — the file manager is the
-/// default; `leader g`/`e` flip views (and focus the panel).
+/// What the Panel overlay shows — `leader g`/`e` open it on Git/Files,
+/// and `g`/`e` inside the panel flip views.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanelView {
     Files,
@@ -29,7 +20,8 @@ pub enum InputMode {
     Normal,
     Leader,
     Palette,
-    Sidebar,
+    /// Modal Files/Git overlay panel (leader g/e opens it).
+    Panel,
     Finder,
     Search,
     /// leader+[ — keyboard selection over a pane's grid; y yanks via OSC52.
@@ -72,25 +64,22 @@ pub struct App {
     pub palette: Option<crate::palette::Palette>,
     pub last_watch_poll: Instant,
     pub app_tx: mpsc::Sender<AppEvent>,
-    pub sidebar_sel: usize,
+    pub panel_sel: usize,
     /// Panel list scroll offset — owned by the renderer (draw keeps the
     /// selection inside the viewport), read by click hit-testing.
     /// `Cell` because draw only holds `&App`.
     pub panel_scroll: std::cell::Cell<usize>,
-    pub sidebar_branches: bool,
-    /// Which content the bottom sidebar panel shows (default Files).
+    pub panel_branches: bool,
+    /// Which content the panel overlay shows (default Files).
     pub panel_view: PanelView,
     /// Lazy file tree for the Files view — rebuilt per project root.
     pub files: Option<crate::files::FileTree>,
     /// Dotfiles hidden by default; C-S-h (or `.`) toggles — rebuilds
     /// the tree.
     pub files_show_hidden: bool,
-    /// Focused sidebar section — `enter_sidebar` (leader g/e) lands on
-    /// Panel; clicking a project row focuses Projects.
-    pub sidebar_focus: SidebarSection,
-    /// Cached branch list — populated on enter_sidebar/toggle so the
+    /// Cached branch list — populated on panel open/toggle so the
     /// renderer and len helpers never shell out to git per frame.
-    pub sidebar_branch_list: Vec<String>,
+    pub panel_branch_list: Vec<String>,
     pub git_status: Option<crate::git::GitStatus>,
     pub git_poll_in_flight: bool,
     pub last_git_poll: Instant,
@@ -101,8 +90,6 @@ pub struct App {
     /// One AI-commit worker at a time — set before spawn, cleared when
     /// the AppEvent::AiMessage result is drained.
     pub ai_in_flight: bool,
-    /// Leader `b` toggles the sidebar; hidden = panes take the width.
-    pub sidebar_visible: bool,
     /// Leader `d` — the run loop breaks and main forks a keeper daemon.
     pub detach_requested: bool,
     /// Set in `daemonize` — this process IS the keeper, so `leader d`
@@ -153,20 +140,18 @@ impl App {
             palette: None,
             last_watch_poll: Instant::now(),
             app_tx,
-            sidebar_sel: 0,
+            panel_sel: 0,
             panel_scroll: std::cell::Cell::new(0),
             panel_view: PanelView::Files,
             files: None,
             files_show_hidden: false,
-            sidebar_focus: SidebarSection::Panel,
-            sidebar_branches: false,
-            sidebar_branch_list: vec![],
+            panel_branches: false,
+            panel_branch_list: vec![],
             git_status: None,
             git_poll_in_flight: false,
             last_git_poll: Instant::now(),
             finder: None,
             commit_root: None,
-            sidebar_visible: true,
             ai_in_flight: false,
             detach_requested: false,
             is_keeper: false,
@@ -223,7 +208,7 @@ impl App {
     /// previously-active root. The next 1s poll repopulates it.
     fn clear_git_cache(&mut self) {
         self.git_status = None;
-        self.sidebar_branch_list.clear();
+        self.panel_branch_list.clear();
     }
 
     pub fn alloc_pane_id(&mut self) -> u32 {
@@ -259,9 +244,10 @@ impl App {
             self.active_project = idx;
             self.ensure_active_pane();
             self.clear_git_cache();
-            // The file tree is rooted at the project — rebuild on switch.
-            self.rebuild_files();
-            self.sidebar_sel = 0;
+            // The file tree is rooted at the project — invalidate on
+            // switch; the panel rebuilds lazily on next open.
+            self.files = None;
+            self.panel_sel = 0;
             self.panel_scroll.set(0);
         }
     }
@@ -275,8 +261,8 @@ impl App {
             .map(|r| crate::files::FileTree::new(r, show));
     }
 
-    /// Builds the sidebar file tree for the active root if needed —
-    /// lazy so a sidebar that never opens never pays for it.
+    /// Builds the file tree for the active root if needed — lazy so a
+    /// Files panel that never opens never pays for it.
     pub fn ensure_files(&mut self) {
         if self.files.is_none() {
             self.rebuild_files();
@@ -287,7 +273,7 @@ impl App {
     pub fn toggle_files_hidden(&mut self) {
         self.files_show_hidden = !self.files_show_hidden;
         self.rebuild_files();
-        self.sidebar_sel = 0;
+        self.panel_sel = 0;
         self.panel_scroll.set(0);
         self.flash(if self.files_show_hidden {
             "dotfiles shown"
@@ -508,9 +494,7 @@ impl App {
         }
         if !self.projects.is_empty() {
             self.active_project = s.active_project.min(self.projects.len() - 1);
-            self.sidebar_visible = s.sidebar_visible;
             self.ensure_active_pane();
-            self.ensure_files();
         }
     }
 
@@ -631,75 +615,44 @@ impl App {
         self.active_project().map(|p| p.root.clone())
     }
 
-    pub fn enter_sidebar(&mut self) {
-        self.sidebar_visible = true; // focusing un-hides the panel
-        match self.panel_view {
+    /// Open the modal Files/Git overlay panel — `leader e`/`g`, and
+    /// `e`/`g` inside the panel switch views without leaving it.
+    pub fn open_panel(&mut self, view: PanelView) {
+        self.panel_view = view;
+        match view {
             PanelView::Git => {
                 if let Some(root) = self.active_root() {
                     self.git_status = crate::git::status(&root); // instant refresh
-                    self.sidebar_branch_list = crate::git::branches(&root);
+                    self.panel_branch_list = crate::git::branches(&root);
                 }
             }
             PanelView::Files => self.ensure_files(),
         }
-        self.sidebar_sel = 0;
-        self.sidebar_branches = false;
-        // `leader g`/`e` land on the bottom panel — that's where the
-        // actions live; clicking a project row overrides to Projects.
-        self.sidebar_focus = SidebarSection::Panel;
-        self.mode = InputMode::Sidebar;
-    }
-
-    /// Tab — flip keyboard focus between the Projects section and the
-    /// bottom panel.
-    pub fn sidebar_toggle_focus(&mut self) {
-        self.sidebar_focus = match self.sidebar_focus {
-            SidebarSection::Projects => SidebarSection::Panel,
-            SidebarSection::Panel => SidebarSection::Projects,
-        };
-    }
-
-    /// j/k while Projects-focused — moving switches projects live,
-    /// same as clicking through the list.
-    pub fn sidebar_project_move(&mut self, delta: i32) {
-        let n = self.projects.len() as i32;
-        if n == 0 {
-            return;
-        }
-        let next = (self.active_project as i32 + delta).clamp(0, n - 1) as usize;
-        if next != self.active_project {
-            self.set_active_project(next);
-        }
-    }
-
-    /// Leader `b` — hide/show the whole sidebar. Hiding while focused
-    /// inside it returns focus to the panes.
-    pub fn toggle_sidebar(&mut self) {
-        self.sidebar_visible = !self.sidebar_visible;
-        if !self.sidebar_visible && matches!(self.mode, InputMode::Sidebar) {
-            self.mode = InputMode::Normal;
-        }
+        self.panel_sel = 0;
+        self.panel_scroll.set(0);
+        self.panel_branches = false;
+        self.mode = InputMode::Panel;
     }
 
     /// Toggle file↔branch list; refreshes the cached branch list.
-    pub fn sidebar_toggle_branches(&mut self) {
-        self.sidebar_branches = !self.sidebar_branches;
-        self.sidebar_sel = 0;
-        if self.sidebar_branches {
+    pub fn panel_toggle_branches(&mut self) {
+        self.panel_branches = !self.panel_branches;
+        self.panel_sel = 0;
+        if self.panel_branches {
             if let Some(root) = self.active_root() {
-                self.sidebar_branch_list = crate::git::branches(&root);
+                self.panel_branch_list = crate::git::branches(&root);
             }
         }
     }
 
-    /// Rows in the active sidebar list — file tree, git files, or
+    /// Rows in the active panel list — file tree, git files, or
     /// branches, depending on the panel view.
-    pub fn sidebar_items_len(&self) -> usize {
+    pub fn panel_items_len(&self) -> usize {
         match self.panel_view {
             PanelView::Files => self.files.as_ref().map(|t| t.rows.len()).unwrap_or(0),
             PanelView::Git => {
-                if self.sidebar_branches {
-                    self.sidebar_branch_list.len()
+                if self.panel_branches {
+                    self.panel_branch_list.len()
                 } else {
                     self.git_status.as_ref().map(|s| s.files.len()).unwrap_or(0)
                 }
@@ -707,33 +660,33 @@ impl App {
         }
     }
 
-    /// Move the sidebar selection, clamped to the current list.
-    pub fn sidebar_move(&mut self, delta: i32) {
-        let n = self.sidebar_items_len();
+    /// Move the panel selection, clamped to the current list.
+    pub fn panel_move(&mut self, delta: i32) {
+        let n = self.panel_items_len();
         if n == 0 {
-            self.sidebar_sel = 0;
+            self.panel_sel = 0;
             return;
         }
-        let cur = self.sidebar_sel as i32;
-        self.sidebar_sel = (cur + delta).clamp(0, n as i32 - 1) as usize;
+        let cur = self.panel_sel as i32;
+        self.panel_sel = (cur + delta).clamp(0, n as i32 - 1) as usize;
     }
 
-    pub fn sidebar_selected_file(&self) -> Option<String> {
+    pub fn panel_selected_file(&self) -> Option<String> {
         self.git_status
             .as_ref()?
             .files
-            .get(self.sidebar_sel)
+            .get(self.panel_sel)
             .map(|f| f.path.clone())
     }
 
-    pub fn sidebar_selected_branch(&self) -> Option<String> {
-        self.sidebar_branch_list.get(self.sidebar_sel).cloned()
+    pub fn panel_selected_branch(&self) -> Option<String> {
+        self.panel_branch_list.get(self.panel_sel).cloned()
     }
 
-    /// Sidebar space: stage a file with unstaged work, unstage a fully
+    /// Panel space: stage a file with unstaged work, unstage a fully
     /// staged one. Refresh the cached status so the row re-renders.
-    pub fn sidebar_toggle_stage(&mut self) {
-        if self.panel_view != PanelView::Git || self.sidebar_branches {
+    pub fn panel_toggle_stage(&mut self) {
+        if self.panel_view != PanelView::Git || self.panel_branches {
             return;
         }
         let Some(root) = self.active_root() else {
@@ -742,7 +695,7 @@ impl App {
         let Some((has_unstaged, path)) = self
             .git_status
             .as_ref()
-            .and_then(|s| s.files.get(self.sidebar_sel))
+            .and_then(|s| s.files.get(self.panel_sel))
             .map(|f| (f.has_unstaged(), f.path.clone()))
         else {
             return;
@@ -1007,24 +960,19 @@ impl App {
         }
     }
 
-    /// Activate the selected sidebar row — Files view opens files in an
+    /// Activate the selected panel row — Files view opens files in an
     /// editor float and folds dirs; Git view switches branches or opens
     /// a `git diff HEAD` float. Shared by Enter and click-on-selected.
-    pub fn sidebar_activate(&mut self) {
+    pub fn panel_activate(&mut self) {
         if self.panel_view == PanelView::Files {
             self.ensure_files();
-            if let Some(path) = self
-                .files
-                .as_mut()
-                .and_then(|t| t.activate(self.sidebar_sel))
-            {
+            if let Some(path) = self.files.as_mut().and_then(|t| t.activate(self.panel_sel)) {
                 self.open_file_float(&path);
             }
             return;
         }
-        if self.sidebar_branches {
-            if let (Some(root), Some(branch)) = (self.active_root(), self.sidebar_selected_branch())
-            {
+        if self.panel_branches {
+            if let (Some(root), Some(branch)) = (self.active_root(), self.panel_selected_branch()) {
                 match crate::git::switch(&root, &branch) {
                     Ok(()) => {
                         self.git_status = crate::git::status(&root);
@@ -1033,7 +981,7 @@ impl App {
                     Err(e) => self.flash(format!("git switch: {e}")),
                 }
             }
-        } else if let Some(file) = self.sidebar_selected_file() {
+        } else if let Some(file) = self.panel_selected_file() {
             // `diff HEAD` covers staged AND unstaged changes —
             // plain `diff` leaves staged edits invisible. No `exec`
             // here: the float stays a live shell showing the diff in
@@ -1044,6 +992,8 @@ impl App {
                 shell_quote(&file)
             );
             self.spawn_float("git diff", &cmd);
+            // The diff float owns input now — the panel steps aside.
+            self.mode = InputMode::Normal;
         }
     }
 
@@ -1056,7 +1006,7 @@ impl App {
 
     /// Open a file in a centered editor float — config.editor → $VISUAL
     /// → $EDITOR → nvim. `exec`d so quitting the editor pops the float.
-    /// Shared by the finder and the sidebar file manager.
+    /// Shared by the finder and the Files panel.
     pub fn open_file_float(&mut self, path: &std::path::Path) {
         let editor = self
             .config
@@ -1078,7 +1028,7 @@ impl App {
     pub fn files_collapse_or_parent(&mut self) {
         self.ensure_files();
         if let Some(t) = self.files.as_mut() {
-            self.sidebar_sel = t.collapse_or_parent(self.sidebar_sel);
+            self.panel_sel = t.collapse_or_parent(self.panel_sel);
         }
     }
 
@@ -1086,7 +1036,7 @@ impl App {
     pub fn files_expand(&mut self) {
         self.ensure_files();
         if let Some(t) = self.files.as_mut() {
-            t.expand(self.sidebar_sel);
+            t.expand(self.panel_sel);
         }
     }
 
@@ -1415,7 +1365,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_items_len_follows_files_or_branches() {
+    fn panel_items_len_follows_files_or_branches() {
         let mut app = app_with_one_project();
         app.panel_view = PanelView::Git;
         app.git_status = Some(crate::git::GitStatus {
@@ -1435,14 +1385,14 @@ mod tests {
                 },
             ],
         });
-        assert_eq!(app.sidebar_items_len(), 2);
-        app.sidebar_branches = true;
-        app.sidebar_branch_list = vec!["main".into(), "dev".into()];
-        assert_eq!(app.sidebar_items_len(), 2);
+        assert_eq!(app.panel_items_len(), 2);
+        app.panel_branches = true;
+        app.panel_branch_list = vec!["main".into(), "dev".into()];
+        assert_eq!(app.panel_items_len(), 2);
     }
 
     #[test]
-    fn sidebar_move_clamps_selection() {
+    fn panel_move_clamps_selection() {
         let mut app = app_with_one_project();
         app.git_status = Some(crate::git::GitStatus {
             branch: "m".into(),
@@ -1453,14 +1403,14 @@ mod tests {
                 path: "a".into(),
             }],
         });
-        app.sidebar_move(1);
-        assert_eq!(app.sidebar_sel, 0); // wraps or clamps to len-1
-        app.sidebar_move(-1);
-        assert_eq!(app.sidebar_sel, 0);
+        app.panel_move(1);
+        assert_eq!(app.panel_sel, 0); // wraps or clamps to len-1
+        app.panel_move(-1);
+        assert_eq!(app.panel_sel, 0);
     }
 
     #[test]
-    fn sidebar_file_activates_into_a_diff_float() {
+    fn panel_file_activates_into_a_diff_float() {
         let mut app = app_with_one_project();
         app.panel_view = PanelView::Git;
         app.git_status = Some(crate::git::GitStatus {
@@ -1472,8 +1422,8 @@ mod tests {
                 path: "src/a.rs".into(),
             }],
         });
-        app.sidebar_sel = 0;
-        app.sidebar_activate();
+        app.panel_sel = 0;
+        app.panel_activate();
         let project = app.active_project().unwrap();
         assert_eq!(project.floats.len(), 1);
         assert!(
@@ -1576,10 +1526,10 @@ mod tests {
                 path: "x".into(),
             }],
         });
-        app.sidebar_branch_list = vec!["main".into()];
+        app.panel_branch_list = vec!["main".into()];
         app.set_active_project(1);
         assert!(app.git_status.is_none());
-        assert!(app.sidebar_branch_list.is_empty());
+        assert!(app.panel_branch_list.is_empty());
     }
 
     #[test]
@@ -1664,7 +1614,6 @@ mod tests {
         crate::session::Session {
             version: 1,
             active_project: 0,
-            sidebar_visible: false,
             projects: vec![crate::session::SessionProject {
                 name: "demo".into(),
                 root: PathBuf::from("/tmp"),
@@ -1696,7 +1645,6 @@ mod tests {
         let mut app = app_with_projects(&[]);
         app.restore_session(&session_fixture());
         assert_eq!(app.projects.len(), 1);
-        assert!(!app.sidebar_visible, "flag restored");
         let p = &app.projects[0];
         assert_eq!(p.name, "demo");
         assert_eq!(p.panes.len(), 2);
@@ -1746,7 +1694,6 @@ mod tests {
         app.restore_session(&crate::session::Session {
             version: 1,
             active_project: 0,
-            sidebar_visible: true,
             projects: vec![],
         });
         assert!(app.projects.is_empty());

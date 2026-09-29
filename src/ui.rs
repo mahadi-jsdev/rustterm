@@ -10,12 +10,8 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    let (sidebar_area, main_area, status_area) =
-        frame_areas(area, app.sidebar_visible, app.config.sidebar_width);
+    let (main_area, status_area) = frame_areas(area);
 
-    if app.sidebar_visible {
-        draw_sidebar(frame, app, sidebar_area);
-    }
     draw_panes(frame, app, main_area);
     // Floats overlay everything except the status bar.
     let overlay = Rect {
@@ -23,6 +19,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ..area
     };
     draw_floats(frame, app, overlay);
+    // The Files/Git panel is a modal overlay — drawn over floats.
+    if matches!(app.mode, InputMode::Panel) {
+        draw_panel_overlay(frame, app, overlay);
+    }
     draw_copy_overlay(frame, app, main_area, overlay);
     draw_mouse_sel_overlay(frame, app, main_area, overlay);
     draw_status_bar(frame, app, status_area);
@@ -35,62 +35,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
-    // Projects get their rows + border, capped at 10 so git always shows.
-    let project_h = (app.projects.len() as u16 + 2).min(10).min(area.height);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(project_h), Constraint::Min(5)])
-        .split(area);
-    let items: Vec<ListItem> = app
-        .projects
-        .iter()
-        .enumerate()
-        .map(|(i, project)| {
-            let badge = if project.panes.iter().any(|p| p.waiting) {
-                " ●"
-            } else if project.panes.iter().any(|p| p.attention) {
-                " !"
-            } else {
-                ""
-            };
-            if i == app.active_project {
-                let style = Style::default()
-                    .fg(app.config.accent)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED);
-                ListItem::new(format!("▸ {}{}", project.name, badge)).style(style)
-            } else {
-                ListItem::new(format!("  {}{}", project.name, badge))
-            }
-        })
-        .collect();
-    let projects_focused = matches!(app.mode, InputMode::Sidebar)
-        && app.sidebar_focus == crate::app::SidebarSection::Projects;
-    let projects_border = if projects_focused {
-        Style::default().fg(app.config.accent)
-    } else {
-        Style::default()
-    };
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(projects_border)
-            .title("Projects"),
-    );
-    frame.render_widget(list, chunks[0]);
-    draw_panel(frame, app, chunks[1]);
-}
-
-/// The sidebar's bottom panel — a file tree by default, or the git
-/// section when panel_view is Git (leader g/e flip it).
-fn draw_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let focused = matches!(app.mode, InputMode::Sidebar)
-        && app.sidebar_focus == crate::app::SidebarSection::Panel;
-    let border = if focused {
-        Style::default().fg(app.config.accent)
-    } else {
-        Style::default()
-    };
+/// The modal Files/Git panel — a centered popup that owns input while
+/// open (leader g/e open it, Esc/q/click-outside dismiss). Rows are the
+/// file tree by default, git status/branches under panel_view = Git.
+/// Rect math lives in `input::panel_rect` — keep the two in sync.
+fn draw_panel_overlay(frame: &mut Frame, app: &App, overlay: Rect) {
+    let area = crate::layout::float_rect(overlay, 0, app.config.float_pct);
+    frame.render_widget(Clear, area);
 
     let (title, items) = match app.panel_view {
         crate::app::PanelView::Files => {
@@ -111,7 +62,7 @@ fn draw_panel(frame: &mut Frame, app: &App, area: Rect) {
                         } else {
                             format!("{}  {}", indent, name)
                         };
-                        sidebar_row(text, i, app.sidebar_sel, focused)
+                        panel_row(text, i, app.panel_sel)
                     })
                     .collect(),
                 None => vec![ListItem::new("  empty")],
@@ -124,11 +75,11 @@ fn draw_panel(frame: &mut Frame, app: &App, area: Rect) {
                 .as_ref()
                 .map(|s| format!("⎇ {}", s.branch))
                 .unwrap_or_else(|| "git".to_string());
-            let items: Vec<ListItem> = if app.sidebar_branches {
-                app.sidebar_branch_list
+            let items: Vec<ListItem> = if app.panel_branches {
+                app.panel_branch_list
                     .iter()
                     .enumerate()
-                    .map(|(i, b)| sidebar_row(b.clone(), i, app.sidebar_sel, focused))
+                    .map(|(i, b)| panel_row(b.clone(), i, app.panel_sel))
                     .collect()
             } else {
                 match app.git_status.as_ref() {
@@ -140,12 +91,7 @@ fn draw_panel(frame: &mut Frame, app: &App, area: Rect) {
                             // Staged rows show the letter green, unstaged
                             // dim — space toggles between the two states.
                             let mark = if f.staged_only() { "+" } else { " " };
-                            sidebar_row(
-                                format!("{}{} {}", mark, f.status, f.path),
-                                i,
-                                app.sidebar_sel,
-                                focused,
-                            )
+                            panel_row(format!("{}{} {}", mark, f.status, f.path), i, app.panel_sel)
                         })
                         .collect(),
                     None => vec![ListItem::new("  no repo")],
@@ -161,10 +107,10 @@ fn draw_panel(frame: &mut Frame, app: &App, area: Rect) {
     let vis = area.height.saturating_sub(2) as usize;
     let len = items.len();
     let mut scroll = app.panel_scroll.get();
-    if app.sidebar_sel < scroll {
-        scroll = app.sidebar_sel;
-    } else if vis > 0 && app.sidebar_sel >= scroll + vis {
-        scroll = app.sidebar_sel + 1 - vis;
+    if app.panel_sel < scroll {
+        scroll = app.panel_sel;
+    } else if vis > 0 && app.panel_sel >= scroll + vis {
+        scroll = app.panel_sel + 1 - vis;
     }
     scroll = scroll.min(len.saturating_sub(vis));
     app.panel_scroll.set(scroll);
@@ -172,13 +118,15 @@ fn draw_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border)
+        .border_style(Style::default().fg(app.config.accent))
         .title(title);
     frame.render_widget(List::new(items).block(block), area);
 }
 
-fn sidebar_row(text: String, i: usize, sel: usize, focused: bool) -> ListItem<'static> {
-    let style = if focused && i == sel {
+/// The panel is modal — while it's up it owns focus, so the selected
+/// row is always highlighted (no focused/unfocused variants).
+fn panel_row(text: String, i: usize, sel: usize) -> ListItem<'static> {
+    let style = if i == sel {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
         Style::default()
@@ -477,24 +425,18 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 )
             }
             InputMode::Leader => {
-                "n new  x close  h/l switch  z zoom  . flag  H hide  [ ] project  +/- split  :/p palette  c add  b side  g git  e files  o term  G lazygit  L log  f find  / search  d detach  q quit"
+                "n new  x close  h/l switch  z zoom  . flag  H hide  [ ] project  +/- split  :/p palette  c add  g git  e files  o term  G lazygit  L log  f find  / search  d detach  q quit"
                     .to_string()
             }
             InputMode::Palette => "type to filter  ↑/↓ move  enter run  esc cancel".to_string(),
-            InputMode::Sidebar => match app.sidebar_focus {
-                crate::app::SidebarSection::Projects => {
-                    "j/k switch  enter open  tab panel  esc back".to_string()
+            InputMode::Panel => match app.panel_view {
+                crate::app::PanelView::Git => {
+                    "j/k move  enter diff  space stage  b branches  c ai-commit  e files  q/esc close"
+                        .to_string()
                 }
-                crate::app::SidebarSection::Panel => match app.panel_view {
-                    crate::app::PanelView::Git => {
-                        "j/k move  enter open  space stage  b branches  c ai-commit  tab projects  esc back"
-                            .to_string()
-                    }
-                    crate::app::PanelView::Files => {
-                        "j/k move  h/l fold  enter open  . hidden  tab projects  esc back"
-                            .to_string()
-                    }
-                },
+                crate::app::PanelView::Files => {
+                    "j/k move  h/l fold  enter open  . hidden  g git  q/esc close".to_string()
+                }
             },
             InputMode::Finder => "type to filter  ↑/↓ move  enter open  esc cancel".to_string(),
             InputMode::Copy => {
@@ -531,6 +473,20 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
     frame.render_widget(Paragraph::new(text), area);
+    // Project name bottom-right — without a sidebar it's the only
+    // always-on indicator of which project the panes belong to. Right-
+    // aligned Paragraph overwrites whatever status text lands under it
+    // on narrow screens (a clean truncation, not overlap).
+    if let Some(project) = app.active_project() {
+        let name = Paragraph::new(format!(" {} ", project.name))
+            .style(
+                Style::default()
+                    .fg(app.config.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(ratatui::layout::Alignment::Right);
+        frame.render_widget(name, area);
+    }
 }
 
 /// Overlay rect shared by palette + finder: 3/5 of the screen but ≥30 cols
@@ -665,8 +621,8 @@ mod tests {
         terminal.draw(|frame| draw(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer();
 
-        // Pane-grid area: right of the 24-col sidebar, above the status bar.
-        let grid = Rect::new(24, 0, 56, 23);
+        // Pane-grid area: the full frame width, above the status bar.
+        let grid = Rect::new(0, 0, 80, 23);
         for y in grid.y..grid.y + grid.height {
             assert!(
                 (grid.x..grid.x + grid.width).any(|x| buffer[(x, y)].symbol() != " "),
@@ -718,9 +674,9 @@ mod tests {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), dir.clone()));
-        app.enter_sidebar();
+        app.open_panel(crate::app::PanelView::Files);
         // Selection far below the fold — the draw must scroll to it.
-        app.sidebar_sel = 30;
+        app.panel_sel = 30;
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -732,7 +688,7 @@ mod tests {
         assert!(!buffer_contains(buffer, "f00.txt"), "top rows scrolled off");
 
         // Scrolling back up restores the top of the list.
-        app.sidebar_sel = 0;
+        app.panel_sel = 0;
         terminal.draw(|frame| draw(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer();
         assert!(buffer_contains(buffer, "f00.txt"));
@@ -744,7 +700,8 @@ mod tests {
     fn status_bar_shows_pane_census_and_states() {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.spawn_pane(None);
         app.spawn_pane(None);
         app.spawn_pane(None);
@@ -778,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_shows_project_names() {
+    fn status_bar_shows_active_project_name_bottom_right() {
         let (tx, atx) = two_channels();
         let mut app = App::new(tx, atx);
         app.projects
@@ -791,29 +748,21 @@ mod tests {
         terminal.draw(|frame| draw(frame, &app)).unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert!(buffer_contains(buffer, "alpha"));
-        assert!(buffer_contains(buffer, "beta"));
-    }
-
-    #[test]
-    fn active_project_row_is_highlighted() {
-        let (tx, atx) = two_channels();
-        let mut app = App::new(tx, atx);
-        app.projects
-            .push(Project::new("alpha".into(), PathBuf::from("/tmp")));
-        app.projects
-            .push(Project::new("beta".into(), PathBuf::from("/tmp")));
-
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, &app)).unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let marker = (0..buffer.area.height)
-            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
-            .find(|&(x, y)| buffer[(x, y)].symbol() == "▸")
-            .expect("active project marker not rendered");
-        assert!(buffer[marker].modifier.contains(Modifier::REVERSED));
+        let last = buffer.area.height - 1;
+        assert!(
+            row_contains(buffer, last, "alpha"),
+            "active project name in the status bar"
+        );
+        // Only the ACTIVE project — the inactive one is palette-only now.
+        assert!(!row_contains(buffer, last, "beta"));
+        // Right edge: the name is flush to the bottom-right corner.
+        let row: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, last)].symbol().to_string())
+            .collect();
+        assert!(
+            row.trim_end().ends_with("alpha"),
+            "project name sits at the right edge: {row:?}"
+        );
     }
 
     #[test]
@@ -994,13 +943,14 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_shows_branch_and_changed_files() {
+    fn git_panel_overlay_shows_branch_and_changed_files() {
         let (tx, _rx) = mpsc::channel();
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
         app.projects
             .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.panel_view = crate::app::PanelView::Git;
+        app.mode = InputMode::Panel;
         app.git_status = Some(crate::git::GitStatus {
             branch: "main".into(),
             files: vec![crate::git::ChangedFile {

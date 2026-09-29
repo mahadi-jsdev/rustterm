@@ -8,7 +8,7 @@ use ratatui::layout::{Position, Rect};
 
 /// Route a mouse event. Wheel scrolls the pane under the cursor (or
 /// forwards to it when the app enabled mouse reporting). Left press
-/// focuses panes and drives the sidebar AND anchors a text selection:
+/// focuses panes and drives the modal panel AND anchors a text selection:
 /// drag extends it (auto-scrolling scrollback at the pane's top/bottom
 /// edge), release yanks it to the clipboard via OSC52. Apps with mouse
 /// reporting get press/drag/release forwarded; Shift bypasses to local
@@ -26,17 +26,16 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
 
 /// (main grid area, float overlay area) — the two regions selection
 /// coordinates can come from; the status bar is never selectable.
-fn selectable_areas(app: &App, frame_area: Rect) -> (Rect, Rect) {
+fn selectable_areas(frame_area: Rect) -> (Rect, Rect) {
     let overlay = Rect {
         height: frame_area.height.saturating_sub(1),
         ..frame_area
     };
-    let (_, main, _) =
-        crate::layout::frame_areas(frame_area, app.sidebar_visible, app.config.sidebar_width);
+    let (main, _) = crate::layout::frame_areas(frame_area);
     (main, overlay)
 }
 
-/// Left press: focus/sidebar via `click`, then anchor a mouse selection
+/// Left press: focus/panel via `click`, then anchor a mouse selection
 /// on the pane under the cursor — or hand the press to its app when it
 /// reports mouse events and Shift isn't held. Floats are modal: only
 /// the top float's interior can anchor/select.
@@ -51,7 +50,7 @@ fn mouse_down(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
         return;
     }
     let pos = Position::new(mouse.column, mouse.row);
-    let (main, overlay) = selectable_areas(app, frame_area);
+    let (main, overlay) = selectable_areas(frame_area);
 
     // Copy mode: a click inside the copy pane places its cursor.
     if matches!(app.mode, InputMode::Copy) {
@@ -76,8 +75,15 @@ fn mouse_down(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
         app.pane_screen_rect(fid, main, overlay)
             .and_then(|r| app.cell_in_pane(fid, pos, r).map(|cell| (fid, r, cell)))
     } else {
-        // Sidebar/status-bar presses are UI clicks — never selections.
+        // Panel/status-bar presses are UI clicks — never selections.
         click(app, mouse, frame_area);
+        // The Panel overlay is modal: a click inside it is handled above
+        // (still Panel) and must not anchor a selection on the pane
+        // behind. A click outside dismisses to Normal — selection then
+        // anchors on that pane as usual.
+        if matches!(app.mode, InputMode::Panel) {
+            return;
+        }
         let Some(project) = app.active_project() else {
             return;
         };
@@ -124,7 +130,7 @@ fn mouse_down(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
 /// move so drag-select works there too).
 fn mouse_drag(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     let pos = Position::new(mouse.column, mouse.row);
-    let (main, overlay) = selectable_areas(app, frame_area);
+    let (main, overlay) = selectable_areas(frame_area);
     if app.mouse_dragging {
         let Some(id) = app.mouse_sel.as_ref().map(|s| s.pane_id) else {
             return;
@@ -202,8 +208,8 @@ fn mouse_up(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
         if let (Some(rect), Some(pane)) = (
             app.pane_screen_rect(
                 id,
-                selectable_areas(app, frame_area).0,
-                selectable_areas(app, frame_area).1,
+                selectable_areas(frame_area).0,
+                selectable_areas(frame_area).1,
             ),
             app.pane_by_id(id),
         ) {
@@ -229,15 +235,21 @@ fn mouse_up(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
 }
 
 fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
-    let sidebar_visible = app.sidebar_visible;
     // Hoisted before the project borrow — NLL rejects self reads inside it.
     let scroll = app.config.scroll_lines;
     let float_pct = app.config.float_pct;
-    let sidebar_width = app.config.sidebar_width;
+    let pos = Position::new(mouse.column, mouse.row);
+    // The Panel overlay is modal — wheel inside scrolls its list, wheel
+    // outside is swallowed rather than scrolling the grid behind.
+    if matches!(app.mode, InputMode::Panel) {
+        if panel_rect(app, frame_area).contains(pos) {
+            app.panel_move(if up { -(scroll as i32) } else { scroll as i32 });
+        }
+        return;
+    }
     let Some(project) = app.active_project_mut() else {
         return;
     };
-    let pos = Position::new(mouse.column, mouse.row);
     // A float is modal — wheel inside it scrolls/forwards to the float,
     // wheel outside is swallowed rather than scrolling the grid behind.
     if let Some(float) = project.top_float() {
@@ -266,22 +278,7 @@ fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
         }
         return;
     }
-    let (sidebar, main, _) = crate::layout::frame_areas(frame_area, sidebar_visible, sidebar_width);
-    // Wheel over the sidebar only acts when the sidebar already owns the
-    // keyboard — a stray flick in Normal mode must not steal focus.
-    if sidebar_visible && sidebar.contains(pos) {
-        if matches!(app.mode, InputMode::Sidebar) {
-            let project_h = (app.projects.len() as u16 + 2).min(10).min(sidebar.height);
-            if pos.y >= sidebar.y + project_h {
-                app.sidebar_focus = crate::app::SidebarSection::Panel;
-                app.sidebar_move(if up { -(scroll as i32) } else { scroll as i32 });
-            } else {
-                app.sidebar_focus = crate::app::SidebarSection::Projects;
-                app.sidebar_project_move(if up { -1 } else { 1 });
-            }
-        }
-        return;
-    }
+    let (main, _) = crate::layout::frame_areas(frame_area);
     let render = project.render_indices();
     let visible: Vec<&crate::pane::Pane> = render.iter().map(|&i| &project.panes[i]).collect();
     let rects =
@@ -318,9 +315,21 @@ fn wheel_scroll(app: &mut App, mouse: MouseEvent, frame_area: Rect, up: bool) {
     }
 }
 
-/// Left-click: a pane focuses it (and exits Sidebar/Leader back to
-/// Normal); the sidebar drives selection/activation. Modal overlays
-/// (palette/finder/line input) swallow clicks — Esc dismisses those.
+/// The centered rect the Panel overlay occupies — click hit-testing and
+/// wheel routing share it with `draw_panel_overlay` so they agree.
+fn panel_rect(app: &App, frame_area: Rect) -> Rect {
+    let overlay = Rect {
+        height: frame_area.height.saturating_sub(1),
+        ..frame_area
+    };
+    crate::layout::float_rect(overlay, 0, app.config.float_pct)
+}
+
+/// Left-click: a pane focuses it (and exits Panel/Leader back to
+/// Normal). Modal overlays (palette/finder/line input) swallow clicks —
+/// Esc dismisses those. With the Panel open, clicks on rows select (a
+/// click on the selected row activates it), the title row flips
+/// Files ↔ Git, and a click outside dismisses the panel.
 fn click(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     if matches!(
         app.mode,
@@ -328,7 +337,12 @@ fn click(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     ) {
         return;
     }
-    // Floats are modal — clicks can't reach the grid or sidebar behind.
+    let pos = Position::new(mouse.column, mouse.row);
+    if matches!(app.mode, InputMode::Panel) {
+        click_panel(app, pos, frame_area);
+        return;
+    }
+    // Floats are modal — clicks can't reach the grid behind.
     if app
         .active_project()
         .map(|p| p.top_float().is_some())
@@ -336,13 +350,7 @@ fn click(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     {
         return;
     }
-    let pos = Position::new(mouse.column, mouse.row);
-    let (sidebar, main, _) =
-        crate::layout::frame_areas(frame_area, app.sidebar_visible, app.config.sidebar_width);
-    if app.sidebar_visible && sidebar.contains(pos) {
-        click_sidebar(app, pos, sidebar);
-        return;
-    }
+    let (main, _) = crate::layout::frame_areas(frame_area);
     if !main.contains(pos) {
         return;
     }
@@ -359,58 +367,35 @@ fn click(app: &mut App, mouse: MouseEvent, frame_area: Rect) {
     app.mode = InputMode::Normal;
 }
 
-/// Click inside the sidebar: the "Projects" title row collapses the
-/// panel, project rows switch projects, the git block's title row
-/// toggles files↔branches, and git rows select — a click on the
-/// already-selected row activates it (same as Enter).
-fn click_sidebar(app: &mut App, pos: Position, sidebar: Rect) {
-    if pos.y == sidebar.y {
-        app.toggle_sidebar();
+/// Click inside the Panel overlay — title row flips Files ↔ Git, a row
+/// selects (clicking the selected row activates it, same as Enter), a
+/// click outside the box dismisses to Normal.
+fn click_panel(app: &mut App, pos: Position, frame_area: Rect) {
+    let rect = panel_rect(app, frame_area);
+    if !rect.contains(pos) {
+        app.mode = InputMode::Normal;
         return;
     }
-    let project_h = (app.projects.len() as u16 + 2).min(10).min(sidebar.height);
-    let git_top = sidebar.y + project_h;
-    if pos.y < git_top {
-        let row = pos.y - sidebar.y - 1;
-        if (row as usize) < app.projects.len() {
-            app.set_active_project(row as usize);
-            // Switching project by mouse keeps terminal focus — only
-            // claim the sidebar when it's already the active mode.
-            if matches!(app.mode, InputMode::Sidebar) {
-                app.sidebar_focus = crate::app::SidebarSection::Projects;
-            }
-        } else {
-            app.enter_sidebar();
-        }
-        return;
-    }
-    if pos.y == git_top {
-        // Panel title row — clicking flips Files ↔ Git.
-        app.panel_view = match app.panel_view {
+    if pos.y == rect.y {
+        app.open_panel(match app.panel_view {
             crate::app::PanelView::Files => crate::app::PanelView::Git,
             crate::app::PanelView::Git => crate::app::PanelView::Files,
-        };
-        app.enter_sidebar();
+        });
         return;
     }
-    // Panel rows render through a viewport — map the screen row back to
-    // the list index via the scroll offset the last draw recorded.
-    let row = app.panel_scroll.get() + (pos.y - git_top - 1) as usize;
-    if row < app.sidebar_items_len() {
-        if matches!(app.mode, InputMode::Sidebar)
-            && app.sidebar_focus == crate::app::SidebarSection::Panel
-            && app.sidebar_sel == row
-        {
-            app.sidebar_activate();
-        } else {
-            if !matches!(app.mode, InputMode::Sidebar) {
-                app.enter_sidebar();
-            }
-            app.sidebar_focus = crate::app::SidebarSection::Panel;
-            app.sidebar_sel = row;
-        }
+    if pos.y >= rect.y + rect.height - 1 {
+        return; // bottom border — dead zone
+    }
+    // Rows render through a viewport — map the screen row back to the
+    // list index via the scroll offset the last draw recorded.
+    let row = app.panel_scroll.get() + (pos.y - rect.y - 1) as usize;
+    if row >= app.panel_items_len() {
+        return;
+    }
+    if app.panel_sel == row {
+        app.panel_activate();
     } else {
-        app.enter_sidebar();
+        app.panel_sel = row;
     }
 }
 
@@ -519,15 +504,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     app.line_input = Some(edit);
                     app.mode = InputMode::LineInput(LinePurpose::AddProject);
                 }
-                KeyCode::Char('b') => app.toggle_sidebar(),
-                KeyCode::Char('g') => {
-                    app.panel_view = crate::app::PanelView::Git;
-                    app.enter_sidebar();
-                }
-                KeyCode::Char('e') => {
-                    app.panel_view = crate::app::PanelView::Files;
-                    app.enter_sidebar();
-                }
+                // Panel overlays — modal popups over the grid.
+                KeyCode::Char('g') => app.open_panel(crate::app::PanelView::Git),
+                KeyCode::Char('e') => app.open_panel(crate::app::PanelView::Files),
                 // exec'd: `q` in lazygit exits the shell → popup auto-closes.
                 KeyCode::Char('G') => app.spawn_float("lazygit", "exec lazygit"),
                 // Scratch terminal popup — quick command without touching
@@ -607,81 +586,56 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             }
         }
-        InputMode::Sidebar => {
+        InputMode::Panel => {
             // The leader works from every non-text-entry mode — re-enter
-            // Leader before any sidebar-local key handling.
+            // Leader before any panel-local key handling.
             if app.config.is_leader(&key) {
                 app.mode = InputMode::Leader;
                 return;
             }
-            // Tab flips focus between the Projects and Git sections.
-            if key.code == KeyCode::Tab {
-                app.sidebar_toggle_focus();
-                return;
-            }
-            match app.sidebar_focus {
-                crate::app::SidebarSection::Projects => match key.code {
-                    KeyCode::Esc => {
-                        app.mode = InputMode::Normal;
-                    }
-                    KeyCode::Char('h') | KeyCode::Char('g') if key.modifiers.is_empty() => {
-                        app.mode = InputMode::Normal;
-                    }
-                    // Moving switches projects live — the row itself is
-                    // the switch (same as clicking through the list).
-                    KeyCode::Char('j') if key.modifiers.is_empty() => app.sidebar_project_move(1),
-                    KeyCode::Down => app.sidebar_project_move(1),
-                    KeyCode::Char('k') if key.modifiers.is_empty() => app.sidebar_project_move(-1),
-                    KeyCode::Up => app.sidebar_project_move(-1),
-                    // Enter commits to the chosen project — back to panes.
-                    KeyCode::Enter => {
-                        app.mode = InputMode::Normal;
-                    }
+            match key.code {
+                KeyCode::Esc => {
+                    app.mode = InputMode::Normal;
+                }
+                // q and e/g are plain-char bindings — modifier-guarded so
+                // e.g. Ctrl+C can't fire 'c' AI-commit via the git arm.
+                KeyCode::Char('q') if key.modifiers.is_empty() => {
+                    app.mode = InputMode::Normal;
+                }
+                // e/g flip the view without leaving the panel.
+                KeyCode::Char('e') if key.modifiers.is_empty() => {
+                    app.open_panel(crate::app::PanelView::Files)
+                }
+                KeyCode::Char('g') if key.modifiers.is_empty() => {
+                    app.open_panel(crate::app::PanelView::Git)
+                }
+                KeyCode::Char('j') if key.modifiers.is_empty() => app.panel_move(1),
+                KeyCode::Down => app.panel_move(1),
+                KeyCode::Char('k') if key.modifiers.is_empty() => app.panel_move(-1),
+                KeyCode::Up => app.panel_move(-1),
+                KeyCode::Enter => app.panel_activate(),
+                _ if app.panel_view == crate::app::PanelView::Git => match key.code {
+                    KeyCode::Char('b') if key.modifiers.is_empty() => app.panel_toggle_branches(),
+                    KeyCode::Char('c') if key.modifiers.is_empty() => app.start_ai_commit(),
+                    KeyCode::Char(' ') => app.panel_toggle_stage(),
                     _ => {}
                 },
-                crate::app::SidebarSection::Panel => match key.code {
-                    KeyCode::Esc => {
-                        app.mode = InputMode::Normal;
+                // Files view — h folds/jumps up, l expands.
+                _ => match key.code {
+                    // C-(S-)h toggles dotfiles — terminals deliver it as
+                    // ctrl+h, or ctrl+shift+H under kitty keys. `.` is the
+                    // portable fallback (ranger/nnn).
+                    KeyCode::Char('h') | KeyCode::Char('H')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        app.toggle_files_hidden()
                     }
-                    // Plain-char bindings require NO modifiers — otherwise
-                    // e.g. Ctrl+C would run `git add -A` via the 'c' binding.
-                    // (The leader is intercepted above and can't reach here.)
-                    KeyCode::Char('g') if key.modifiers.is_empty() => {
-                        app.mode = InputMode::Normal;
+                    KeyCode::Char('.') if key.modifiers.is_empty() => app.toggle_files_hidden(),
+                    KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
+                        app.files_collapse_or_parent()
                     }
-                    KeyCode::Char('j') if key.modifiers.is_empty() => app.sidebar_move(1),
-                    KeyCode::Down => app.sidebar_move(1),
-                    KeyCode::Char('k') if key.modifiers.is_empty() => app.sidebar_move(-1),
-                    KeyCode::Up => app.sidebar_move(-1),
-                    KeyCode::Enter => app.sidebar_activate(),
-                    _ if app.panel_view == crate::app::PanelView::Git => match key.code {
-                        KeyCode::Char('h') if key.modifiers.is_empty() => {
-                            app.mode = InputMode::Normal;
-                        }
-                        KeyCode::Char('b') if key.modifiers.is_empty() => {
-                            app.sidebar_toggle_branches()
-                        }
-                        KeyCode::Char('c') if key.modifiers.is_empty() => app.start_ai_commit(),
-                        KeyCode::Char(' ') => app.sidebar_toggle_stage(),
-                        _ => {}
-                    },
-                    // Files view — h folds/jumps up, l expands.
-                    _ => match key.code {
-                        // C-(S-)h toggles dotfiles — terminals deliver it
-                        // as ctrl+h, or ctrl+shift+H under kitty keys.
-                        // `.` is the portable fallback (ranger/nnn).
-                        KeyCode::Char('h') | KeyCode::Char('H')
-                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            app.toggle_files_hidden()
-                        }
-                        KeyCode::Char('.') if key.modifiers.is_empty() => app.toggle_files_hidden(),
-                        KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
-                            app.files_collapse_or_parent()
-                        }
-                        KeyCode::Char('l') | KeyCode::Right => app.files_expand(),
-                        _ => {}
-                    },
+                    KeyCode::Char('l') | KeyCode::Right => app.files_expand(),
+                    _ => {}
                 },
             }
         }
@@ -869,7 +823,7 @@ pub fn handle_paste(app: &mut App, text: String) {
                 f.set_query(q);
             }
         }
-        InputMode::Normal | InputMode::Sidebar | InputMode::Search => {
+        InputMode::Normal | InputMode::Search => {
             let mut pending = Vec::new();
             if let Some(project) = app.active_project_mut() {
                 let pane = if project.top_float().is_some() {
@@ -891,7 +845,8 @@ pub fn handle_paste(app: &mut App, text: String) {
                 notify::dispatch(app, id, e);
             }
         }
-        InputMode::Leader | InputMode::Copy => {}
+        // Panel is a modal list — paste is a pane thing, swallow it.
+        InputMode::Leader | InputMode::Copy | InputMode::Panel => {}
     }
 }
 
@@ -1042,29 +997,25 @@ mod tests {
     }
 
     #[test]
-    fn leader_b_toggles_sidebar_visibility() {
+    fn leader_e_opens_files_panel_and_esc_closes() {
         let mut app = app_with_one_project();
-        assert!(app.sidebar_visible);
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
-        handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::NONE));
-        assert!(!app.sidebar_visible);
-        assert!(matches!(app.mode, InputMode::Normal)); // leader consumed
-        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
-        handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::NONE));
-        assert!(app.sidebar_visible);
+        handle_key(&mut app, key(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Panel));
+        assert_eq!(app.panel_view, crate::app::PanelView::Files);
+        handle_key(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Normal));
     }
 
     #[test]
-    fn hiding_while_focused_in_sidebar_returns_to_normal() {
+    fn leader_g_opens_git_panel_and_q_closes() {
         let mut app = app_with_one_project();
-        app.enter_sidebar();
-        assert!(matches!(app.mode, InputMode::Sidebar));
-        app.toggle_sidebar();
-        assert!(!app.sidebar_visible);
+        handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Panel));
+        assert_eq!(app.panel_view, crate::app::PanelView::Git);
+        handle_key(&mut app, key(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(matches!(app.mode, InputMode::Normal));
-        // leader g un-hides it again
-        app.toggle_sidebar();
-        assert!(app.sidebar_visible);
     }
 
     #[test]
@@ -1176,7 +1127,7 @@ mod tests {
         app.spawn_pane(None);
         grow_scrollback(&app);
         let frame = Rect::new(0, 0, 80, 24);
-        // A single pane fills the main area (right of the 24-col sidebar).
+        // A single pane fills the whole main area.
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 10), frame);
         assert_eq!(pane_scrollback(&app), app.config.scroll_lines);
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 10), frame);
@@ -1185,12 +1136,11 @@ mod tests {
     }
 
     #[test]
-    fn wheel_over_sidebar_or_status_bar_does_not_scroll() {
+    fn wheel_over_status_bar_does_not_scroll() {
         let mut app = app_with_one_project();
         app.spawn_pane(None);
         grow_scrollback(&app);
         let frame = Rect::new(0, 0, 80, 24);
-        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 5, 10), frame); // sidebar
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 40, 23), frame); // status row
         assert_eq!(pane_scrollback(&app), 0);
     }
@@ -1233,7 +1183,7 @@ mod tests {
         mouse(MouseEventKind::Down(MouseButton::Left), column, row)
     }
 
-    /// Temp git repo with one modified file — enter_sidebar()'s real
+    /// Temp git repo with one modified file — open_panel(Git)'s real
     /// `git status` call must find something to list.
     fn git_repo(tag: &str) -> PathBuf {
         let root =
@@ -1259,70 +1209,61 @@ mod tests {
     }
 
     #[test]
-    fn click_pane_focuses_it_and_exits_sidebar_mode() {
+    fn click_pane_focuses_it_and_click_outside_panel_dismisses() {
         let mut app = app_with_one_project();
         app.spawn_pane(None);
         app.spawn_pane(None);
-        // Two panes split the main area (x24..80): left ~24..51, right ~52..80.
+        // Two panes split the full-width main area: left ~0..40, right ~40..80.
         handle_mouse(&mut app, click_at(70, 10), frame80());
         assert_eq!(app.active_project().unwrap().active_pane, 1);
 
-        app.enter_sidebar();
-        handle_mouse(&mut app, click_at(30, 10), frame80());
-        assert_eq!(app.active_project().unwrap().active_pane, 0);
+        // A click outside the open panel dismisses it — the click does
+        // NOT pass through to focus the pane underneath (modal).
+        app.open_panel(crate::app::PanelView::Files);
+        handle_mouse(&mut app, click_at(1, 10), frame80());
         assert!(matches!(app.mode, InputMode::Normal));
-    }
-
-    #[test]
-    fn click_project_row_switches_project_and_keeps_normal() {
-        let mut app = app_with_one_project();
-        app.projects
-            .push(Project::new("second".into(), PathBuf::from("/tmp")));
-        // Project rows live at sidebar.y+1 — row 1 is the second project.
-        handle_mouse(&mut app, click_at(5, 2), frame80());
-        assert_eq!(app.active_project, 1);
-        assert!(
-            matches!(app.mode, InputMode::Normal),
-            "mouse project-switch keeps terminal focus"
-        );
-    }
-
-    #[test]
-    fn click_projects_title_row_collapses_sidebar() {
-        let mut app = app_with_one_project();
-        handle_mouse(&mut app, click_at(5, 0), frame80());
-        assert!(!app.sidebar_visible);
+        assert_eq!(app.active_project().unwrap().active_pane, 1);
+        // The next click focuses normally.
+        handle_mouse(&mut app, click_at(1, 10), frame80());
+        assert_eq!(app.active_project().unwrap().active_pane, 0);
     }
 
     #[test]
     fn click_panel_title_row_toggles_view() {
         let mut app = app_with_one_project();
-        // project_h = 1 project + 2 borders = 3 → panel title row is y3.
-        handle_mouse(&mut app, click_at(5, 3), frame80());
-        assert!(matches!(app.mode, InputMode::Sidebar));
+        app.open_panel(crate::app::PanelView::Files);
+        // Overlay on 80x24: float_rect(80x23, 0, 90) → x4..76, y1..21 —
+        // the title row is y1.
+        handle_mouse(&mut app, click_at(10, 1), frame80());
+        assert!(matches!(app.mode, InputMode::Panel), "toggle keeps panel");
         assert_eq!(app.panel_view, crate::app::PanelView::Git);
-        handle_mouse(&mut app, click_at(5, 3), frame80());
+        handle_mouse(&mut app, click_at(10, 1), frame80());
         assert_eq!(app.panel_view, crate::app::PanelView::Files);
     }
 
     #[test]
-    fn click_git_row_selects_then_activates() {
+    fn click_panel_row_selects_then_activates() {
         let root = git_repo("row");
         let (tx, _rx) = mpsc::channel();
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), root.clone()));
-        app.panel_view = crate::app::PanelView::Git;
         app.spawn_pane(None);
+        // A second changed file so row 1 exists — clicking the already-
+        // selected row activates it, so we need to select off row 0.
+        std::fs::write(root.join("b.txt"), b"untracked").unwrap();
+        app.open_panel(crate::app::PanelView::Git);
 
-        // Git rows start at y4 — first click selects (enters Sidebar).
-        handle_mouse(&mut app, click_at(5, 4), frame80());
-        assert!(matches!(app.mode, InputMode::Sidebar));
-        assert_eq!(app.sidebar_sel, 0);
+        // Overlay y1..21; row N is screen y = 2 + N. Click row 1 (y3):
+        // selects without activating.
+        handle_mouse(&mut app, click_at(10, 3), frame80());
+        assert!(matches!(app.mode, InputMode::Panel));
+        assert_eq!(app.panel_sel, 1);
         assert_eq!(app.active_project().unwrap().panes.len(), 1);
 
-        // Clicking the selected row activates it — opens the diff float.
-        handle_mouse(&mut app, click_at(5, 4), frame80());
+        // Clicking the selected row activates it — opens the diff float
+        // and hands it Normal-mode input.
+        handle_mouse(&mut app, click_at(10, 3), frame80());
         let project = app.active_project().unwrap();
         assert_eq!(project.panes.len(), 1, "diff is a popup, not a grid pane");
         assert_eq!(project.floats.len(), 1);
@@ -1331,6 +1272,7 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("git --no-pager diff HEAD"));
+        assert!(matches!(app.mode, InputMode::Normal));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1341,7 +1283,7 @@ mod tests {
             .push(Project::new("second".into(), PathBuf::from("/tmp")));
         app.palette = Some(crate::palette::Palette::open(&app));
         app.mode = InputMode::Palette;
-        handle_mouse(&mut app, click_at(5, 2), frame80()); // project row
+        handle_mouse(&mut app, click_at(40, 10), frame80());
         assert_eq!(app.active_project, 0);
         assert!(matches!(app.mode, InputMode::Palette));
     }
@@ -1429,13 +1371,18 @@ mod tests {
     }
 
     #[test]
-    fn leader_g_enters_sidebar_and_h_exits() {
+    fn panel_e_and_g_flip_views_without_closing() {
         let mut app = app_with_one_project();
         handle_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        handle_key(&mut app, key(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert!(matches!(app.mode, InputMode::Panel));
+        assert_eq!(app.panel_view, crate::app::PanelView::Files);
+        // g flips the open panel to Git; e flips back.
         handle_key(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
-        assert!(matches!(app.mode, InputMode::Sidebar));
-        handle_key(&mut app, key(KeyCode::Char('h'), KeyModifiers::NONE));
-        assert!(matches!(app.mode, InputMode::Normal));
+        assert_eq!(app.panel_view, crate::app::PanelView::Git);
+        assert!(matches!(app.mode, InputMode::Panel));
+        handle_key(&mut app, key(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(app.panel_view, crate::app::PanelView::Files);
     }
 
     #[test]
@@ -1563,15 +1510,14 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_space_stages_then_unstages() {
+    fn panel_space_stages_then_unstages() {
         let root = git_repo("stage");
         let (tx, _rx) = mpsc::channel();
         let (atx, _arx) = mpsc::channel();
         let mut app = App::new(tx, atx);
         app.projects.push(Project::new("demo".into(), root.clone()));
-        app.panel_view = crate::app::PanelView::Git;
-        app.enter_sidebar(); // real git status — one modified file
-        assert_eq!(app.sidebar_items_len(), 1);
+        app.open_panel(crate::app::PanelView::Git); // real git status — one modified file
+        assert_eq!(app.panel_items_len(), 1);
 
         handle_key(&mut app, key(KeyCode::Char(' '), KeyModifiers::NONE));
         let f = &app.git_status.as_ref().unwrap().files[0];
@@ -1801,9 +1747,9 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_ctrl_c_does_not_trigger_ai_commit() {
+    fn panel_ctrl_c_does_not_trigger_ai_commit() {
         let mut app = app_with_one_project();
-        app.enter_sidebar();
+        app.open_panel(crate::app::PanelView::Git);
         // Ctrl+C must not hit the plain 'c' binding — git add -A is a
         // destructive side effect for a key users hit reflexively.
         handle_key(&mut app, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
@@ -1812,7 +1758,7 @@ mod tests {
             app.status_msg.is_none(),
             "no ai-commit path should have run"
         );
-        assert!(matches!(app.mode, InputMode::Sidebar), "mode unchanged");
+        assert!(matches!(app.mode, InputMode::Panel), "mode unchanged");
     }
 
     // ---- files panel: dotfiles toggle + wheel scroll ----
@@ -1845,7 +1791,7 @@ mod tests {
     #[test]
     fn ctrl_h_toggles_dotfiles_in_files_panel() {
         let (mut app, dir) = files_app("ctrlh", 2);
-        app.enter_sidebar();
+        app.open_panel(crate::app::PanelView::Files);
         assert_eq!(
             file_names(&app),
             vec!["f00.txt", "f01.txt"],
@@ -1879,46 +1825,32 @@ mod tests {
     #[test]
     fn dot_key_toggles_dotfiles_as_fallback() {
         let (mut app, dir) = files_app("dot", 1);
-        app.enter_sidebar();
+        app.open_panel(crate::app::PanelView::Files);
         handle_key(&mut app, key(KeyCode::Char('.'), KeyModifiers::NONE));
         assert!(app.files_show_hidden);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn wheel_over_panel_scrolls_selection_in_sidebar_mode() {
+    fn wheel_inside_panel_overlay_scrolls_selection() {
         let (mut app, dir) = files_app("wheel", 8);
         let frame = Rect::new(0, 0, 80, 24);
-        // Normal mode — wheel over the sidebar is swallowed, no focus grab.
+        app.open_panel(crate::app::PanelView::Files);
+        // Overlay is x4..76, y1..21 — (10,10) is inside, (1,10) outside.
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 10, 10), frame);
-        assert_eq!(app.sidebar_sel, 0);
-        assert!(matches!(app.mode, InputMode::Normal));
-        app.enter_sidebar();
-        // Panel rows sit below the Projects block (y >= 3 for 1 project).
-        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 10, 10), frame);
-        assert_eq!(app.sidebar_sel, app.config.scroll_lines);
+        assert_eq!(app.panel_sel, app.config.scroll_lines);
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 10, 10), frame);
-        assert_eq!(app.sidebar_sel, 0);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wheel_over_project_rows_switches_project() {
-        let (mut app, dir) = files_app("wheelproj", 1);
-        app.projects
-            .push(Project::new("second".into(), PathBuf::from("/tmp")));
-        app.enter_sidebar();
-        let frame = Rect::new(0, 0, 80, 24);
-        // Row 2 = second project row (title row 0, rows 1..2 projects).
-        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 10, 1), frame);
-        assert_eq!(app.active_project, 1);
-        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Projects);
+        assert_eq!(app.panel_sel, 0);
+        // Wheel outside the overlay is swallowed, not passed to the pane.
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 1, 10), frame);
+        assert_eq!(app.panel_sel, 0);
+        assert!(matches!(app.mode, InputMode::Panel), "still modal");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- mouse select + copy ----
-    // Single pane: frame 80x24 → sidebar 24 wide, pane rect (24,0,56,23),
-    // content inner (25,1)..(78,21).
+    // Single pane: frame 80x24 → pane rect (0,0,80,23), content inner
+    // (1,1)..(78,21).
 
     #[test]
     fn drag_selects_and_release_copies() {
@@ -1931,7 +1863,7 @@ mod tests {
         let frame = Rect::new(0, 0, 80, 24);
         handle_mouse(
             &mut app,
-            mouse(MouseEventKind::Down(MouseButton::Left), 26, 1),
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 1),
             frame,
         );
         assert!(app.mouse_dragging);
@@ -1939,13 +1871,13 @@ mod tests {
         assert_eq!(sel.anchor, Some((0, 1))); // abs row 0, col 1 ('e')
         handle_mouse(
             &mut app,
-            mouse(MouseEventKind::Drag(MouseButton::Left), 30, 1),
+            mouse(MouseEventKind::Drag(MouseButton::Left), 6, 1),
             frame,
         );
         assert_eq!(app.mouse_sel.as_ref().unwrap().cursor, (0, 5));
         handle_mouse(
             &mut app,
-            mouse(MouseEventKind::Up(MouseButton::Left), 30, 1),
+            mouse(MouseEventKind::Up(MouseButton::Left), 6, 1),
             frame,
         );
         assert!(!app.mouse_dragging);
@@ -1977,22 +1909,22 @@ mod tests {
     }
 
     #[test]
-    fn press_on_border_or_sidebar_anchors_nothing() {
+    fn press_on_border_or_status_bar_anchors_nothing() {
         let mut app = app_with_one_project();
         app.spawn_pane(None);
         let frame = Rect::new(0, 0, 80, 24);
-        // Pane's left border column (x=24) is not content.
+        // Pane's left border column (x=0) is not content.
         handle_mouse(
             &mut app,
-            mouse(MouseEventKind::Down(MouseButton::Left), 24, 5),
+            mouse(MouseEventKind::Down(MouseButton::Left), 0, 5),
             frame,
         );
         assert!(app.mouse_sel.is_none());
         assert!(!app.mouse_dragging);
-        // Sidebar content row — a UI click, not text.
+        // Status-bar row — a UI strip, not text.
         handle_mouse(
             &mut app,
-            mouse(MouseEventKind::Down(MouseButton::Left), 5, 5),
+            mouse(MouseEventKind::Down(MouseButton::Left), 40, 23),
             frame,
         );
         assert!(app.mouse_sel.is_none());
@@ -2083,90 +2015,6 @@ mod tests {
     }
 
     #[test]
-    fn click_project_row_switches_but_keeps_terminal_focus() {
-        let mut app = app_with_one_project();
-        app.projects
-            .push(Project::new("second".into(), PathBuf::from("/tmp")));
-        handle_mouse(&mut app, click_at(5, 2), frame80());
-        assert_eq!(app.active_project, 1);
-        assert!(
-            matches!(app.mode, InputMode::Normal),
-            "project click must not steal focus from the terminal"
-        );
-
-        // Already navigating the sidebar → click stays in the flow and
-        // focuses Projects, not Git.
-        app.enter_sidebar();
-        app.sidebar_focus = crate::app::SidebarSection::Panel;
-        handle_mouse(&mut app, click_at(5, 1), frame80());
-        assert_eq!(app.active_project, 0);
-        assert!(matches!(app.mode, InputMode::Sidebar));
-        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Projects);
-    }
-
-    #[test]
-    fn projects_focus_jk_switches_projects_live() {
-        let mut app = app_with_one_project();
-        app.projects
-            .push(Project::new("second".into(), PathBuf::from("/tmp")));
-        app.projects
-            .push(Project::new("third".into(), PathBuf::from("/tmp")));
-        app.enter_sidebar();
-        app.sidebar_focus = crate::app::SidebarSection::Projects;
-        handle_key(&mut app, key(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(app.active_project, 1);
-        handle_key(&mut app, key(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(app.active_project, 2);
-        handle_key(&mut app, key(KeyCode::Char('k'), KeyModifiers::NONE));
-        assert_eq!(app.active_project, 1);
-        // Git keys do nothing while Projects is focused.
-        handle_key(&mut app, key(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert!(app.status_msg.is_none());
-        // Enter commits to the project — back to panes.
-        handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(app.mode, InputMode::Normal));
-        assert_eq!(app.active_project, 1);
-    }
-
-    #[test]
-    fn tab_flips_sidebar_focus_and_git_keys_stay_git() {
-        let mut app = app_with_one_project();
-        app.projects
-            .push(Project::new("second".into(), PathBuf::from("/tmp")));
-        app.enter_sidebar();
-        assert_eq!(
-            app.sidebar_focus,
-            crate::app::SidebarSection::Panel,
-            "leader g enters at Git"
-        );
-        handle_key(&mut app, key(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Projects);
-        // j navigates projects while Projects-focused, not git rows.
-        handle_key(&mut app, key(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(app.active_project, 1);
-        assert_eq!(app.sidebar_sel, 0);
-        handle_key(&mut app, key(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Panel);
-    }
-
-    #[test]
-    fn click_git_row_focuses_git_section() {
-        let root = git_repo("gfocus");
-        let (tx, _rx) = mpsc::channel();
-        let (atx, _arx) = mpsc::channel();
-        let mut app = App::new(tx, atx);
-        app.projects.push(Project::new("demo".into(), root.clone()));
-        app.projects
-            .push(Project::new("other".into(), PathBuf::from("/tmp")));
-        app.spawn_pane(None);
-        // Start Projects-focused, then click a git row — focus follows.
-        app.enter_sidebar();
-        app.sidebar_focus = crate::app::SidebarSection::Projects;
-        handle_mouse(&mut app, click_at(5, 5), frame80()); // first git row
-        assert_eq!(app.sidebar_focus, crate::app::SidebarSection::Panel);
-    }
-
-    #[test]
     fn float_interior_selects_but_outside_is_swallowed() {
         let mut app = app_with_one_project();
         app.spawn_pane(None);
@@ -2213,7 +2061,7 @@ mod tests {
         let frame = Rect::new(0, 0, 80, 24);
         handle_mouse(
             &mut app,
-            mouse(MouseEventKind::Down(MouseButton::Left), 30, 1),
+            mouse(MouseEventKind::Down(MouseButton::Left), 6, 1),
             frame,
         );
         assert!(
@@ -2224,7 +2072,7 @@ mod tests {
         assert!(app.copy.as_ref().unwrap().anchor.is_none());
         handle_mouse(
             &mut app,
-            mouse(MouseEventKind::Drag(MouseButton::Left), 34, 1),
+            mouse(MouseEventKind::Drag(MouseButton::Left), 10, 1),
             frame,
         );
         let copy = app.copy.as_ref().unwrap();

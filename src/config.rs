@@ -12,7 +12,6 @@ pub struct Config {
     pub leader_char: char,
     /// Editor command for the finder — beats $VISUAL/$EDITOR/nvim.
     pub editor: Option<String>,
-    pub sidebar_width: u16,
     /// Wheel scroll step, lines per notch.
     pub scroll_lines: usize,
     /// vt100 scrollback lines per pane.
@@ -29,7 +28,6 @@ pub struct Config {
 struct Raw {
     leader: Option<String>,
     editor: Option<String>,
-    sidebar_width: Option<u16>,
     scroll_lines: Option<usize>,
     scrollback: Option<usize>,
     float_pct: Option<u16>,
@@ -42,7 +40,6 @@ impl Default for Config {
         Config {
             leader_char: 'a',
             editor: None,
-            sidebar_width: 24,
             scroll_lines: 3,
             scrollback: 10_000,
             float_pct: 90,
@@ -77,7 +74,10 @@ pub fn load() -> (Config, Option<String>) {
     };
     match toml::from_str::<Raw>(&text) {
         Ok(raw) => (apply(raw), None),
-        Err(e) => (Config::default(), Some(format!("config {}: {e}", path.display()))),
+        Err(e) => (
+            Config::default(),
+            Some(format!("config {}: {e}", path.display())),
+        ),
     }
 }
 
@@ -90,9 +90,6 @@ fn apply(raw: Raw) -> Config {
         if !e.trim().is_empty() {
             c.editor = Some(e.trim().to_string());
         }
-    }
-    if let Some(w) = raw.sidebar_width {
-        c.sidebar_width = w.clamp(10, 80);
     }
     if let Some(n) = raw.scroll_lines {
         c.scroll_lines = n.clamp(1, 50);
@@ -138,22 +135,20 @@ fn parse_color(s: &str) -> Option<Color> {
         "lightcyan" => Color::LightCyan,
         hex if hex.starts_with('#') && hex.len() == 7 => {
             let v = u32::from_str_radix(&hex[1..], 16).ok()?;
-            return Some(Color::Rgb(
-                (v >> 16) as u8,
-                (v >> 8) as u8,
-                v as u8,
-            ));
+            return Some(Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8));
         }
         _ => return None,
     };
     Some(named)
 }
 
-/// The leader check shared by Normal/Sidebar/Copy input paths.
+/// The leader check shared by Normal/Panel/Copy input paths.
 impl Config {
     pub fn is_leader(&self, key: &crossterm::event::KeyEvent) -> bool {
         key.code == crossterm::event::KeyCode::Char(self.leader_char)
-            && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            && key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
     }
 }
 
@@ -174,7 +169,6 @@ mod tests {
         let raw: Raw = toml::from_str(
             r##"leader = "ctrl+b"
                editor = "hx"
-               sidebar_width = 30
                scroll_lines = 5
                scrollback = 50000
                float_pct = 80
@@ -184,7 +178,6 @@ mod tests {
         let c = apply(raw);
         assert_eq!(c.leader_char, 'b');
         assert_eq!(c.editor.as_deref(), Some("hx"));
-        assert_eq!(c.sidebar_width, 30);
         assert_eq!(c.scroll_lines, 5);
         assert_eq!(c.scrollback, 50000);
         assert_eq!(c.float_pct, 80);
@@ -194,9 +187,13 @@ mod tests {
     #[test]
     fn bad_leader_and_color_fall_back() {
         let c = apply(Raw {
-            leader: Some("nope".into()), editor: None, sidebar_width: None,
-            scroll_lines: None, scrollback: None, float_pct: None,
-            accent: Some("banana".into()), selection: None,
+            leader: Some("nope".into()),
+            editor: None,
+            scroll_lines: None,
+            scrollback: None,
+            float_pct: None,
+            accent: Some("banana".into()),
+            selection: None,
         });
         assert_eq!(c.leader_char, 'a');
         assert_eq!(c.accent, Color::Cyan);
@@ -205,11 +202,14 @@ mod tests {
     #[test]
     fn clamps_out_of_range_values() {
         let c = apply(Raw {
-            leader: None, editor: None, sidebar_width: Some(200),
-            scroll_lines: Some(0), scrollback: Some(5), float_pct: Some(5),
-            accent: None, selection: None,
+            leader: None,
+            editor: None,
+            scroll_lines: Some(0),
+            scrollback: Some(5),
+            float_pct: Some(5),
+            accent: None,
+            selection: None,
         });
-        assert_eq!(c.sidebar_width, 80);
         assert_eq!(c.scroll_lines, 1);
         assert_eq!(c.scrollback, 100);
         assert_eq!(c.float_pct, 30);

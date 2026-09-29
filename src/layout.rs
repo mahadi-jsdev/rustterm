@@ -4,29 +4,14 @@ use ratatui::widgets::Borders;
 /// Panes abut — neighbors share a single border line (see pane_borders).
 const GUTTER: u16 = 0;
 
-/// (sidebar, pane-grid, status-bar) regions of a frame. Rendering and
-/// mouse hit-testing share this so they always agree on pane positions.
-/// `sidebar_visible: false` collapses the sidebar — panes get the width.
-pub fn frame_areas(
-    area: Rect,
-    sidebar_visible: bool,
-    sidebar_width: u16,
-) -> (Rect, Rect, Rect) {
+/// (pane-grid, status-bar) regions of a frame. Rendering and mouse
+/// hit-testing share this so they always agree on pane positions.
+pub fn frame_areas(area: Rect) -> (Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(area);
-    if !sidebar_visible {
-        return (Rect::default(), rows[0], rows[1]);
-    }
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(sidebar_width.min(area.width.saturating_sub(20))),
-            Constraint::Min(0),
-        ])
-        .split(rows[0]);
-    (cols[0], cols[1], rows[1])
+    (rows[0], rows[1])
 }
 
 pub fn pane_rects(area: Rect, count: usize, col_split: f32, row_split: f32) -> Vec<Rect> {
@@ -91,12 +76,10 @@ fn split_rows(area: Rect, row_split: f32) -> Vec<Rect> {
 /// drawn (outer frame edges or the pane's own divider duty).
 pub fn pane_borders(rects: &[Rect], r: Rect) -> Borders {
     let mut b = Borders::ALL;
-    let right_abuts = |o: &Rect| {
-        o.x == r.x + r.width && o.y < r.y + r.height && o.y + o.height > r.y
-    };
-    let bottom_abuts = |o: &Rect| {
-        o.y == r.y + r.height && o.x < r.x + r.width && o.x + o.width > r.x
-    };
+    let right_abuts =
+        |o: &Rect| o.x == r.x + r.width && o.y < r.y + r.height && o.y + o.height > r.y;
+    let bottom_abuts =
+        |o: &Rect| o.y == r.y + r.height && o.x < r.x + r.width && o.x + o.width > r.x;
     if rects.iter().any(right_abuts) {
         b.remove(Borders::RIGHT);
     }
@@ -231,19 +214,13 @@ mod tests {
     }
 
     #[test]
-    fn hidden_sidebar_gives_main_the_full_width() {
+    fn frame_areas_gives_main_everything_but_the_status_row() {
         let a = area();
-        let (sb, main, _status) = frame_areas(a, false, 24);
-        assert_eq!(sb.width, 0);
+        let (main, status) = frame_areas(a);
         assert_eq!(main.width, a.width);
-        // Visible sidebar reserves the configured width.
-        let (sb2, main2, _) = frame_areas(a, true, 24);
-        assert_eq!(sb2.width, 24);
-        assert_eq!(main2.width, a.width - 24);
-        // A huge configured width can't starve the grid below 20 cols.
-        let (sb3, main3, _) = frame_areas(a, true, 500);
-        assert_eq!(main3.width, 20);
-        assert_eq!(sb3.width, a.width - 20);
+        assert_eq!(main.height, a.height - 1);
+        assert_eq!(status.height, 1);
+        assert_eq!(status.y, a.height - 1);
     }
 
     #[test]
@@ -254,7 +231,7 @@ mod tests {
         assert_eq!(f0.height, 36);
         assert_eq!(f0.x, 5); // centered: (100-90)/2
         assert_eq!(f0.y, 2); // centered: (40-36)/2
-        // Each deeper float shifts +2x/+1y.
+                             // Each deeper float shifts +2x/+1y.
         let f1 = float_rect(a, 1, 90);
         assert_eq!(f1.x, f0.x + 2);
         assert_eq!(f1.y, f0.y + 1);

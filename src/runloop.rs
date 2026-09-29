@@ -105,7 +105,7 @@ pub fn tick(
                                 app.mode,
                                 crate::app::InputMode::Search
                                     | crate::app::InputMode::Finder
-                                    | crate::app::InputMode::Sidebar
+                                    | crate::app::InputMode::Panel
                             ) {
                                 app.finder = None;
                                 app.mode = crate::app::InputMode::Normal;
@@ -178,7 +178,8 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let (atx, arx) = mpsc::channel();
         let mut app = App::new(tx.clone(), atx);
-        app.projects.push(Project::new("demo".into(), PathBuf::from("/tmp")));
+        app.projects
+            .push(Project::new("demo".into(), PathBuf::from("/tmp")));
         app.spawn_float("nvim", "exec true");
         assert_eq!(app.active_project().unwrap().floats.len(), 1);
 

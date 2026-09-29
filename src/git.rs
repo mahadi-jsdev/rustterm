@@ -136,7 +136,7 @@ pub fn switch(root: &Path, branch: &str) -> Result<(), String> {
     }
 }
 
-/// Sidebar space-toggle: `unstage` → `git restore --staged`, else
+/// Panel space-toggle: `unstage` → `git restore --staged`, else
 /// `git add` (covers unstaged edits and untracked files alike).
 pub fn toggle_stage(root: &Path, path: &str, unstage: bool) -> Result<(), String> {
     let out = if unstage {
@@ -189,7 +189,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let run = |args: &[&str]| {
-            Command::new("git").arg("-C").arg(&root).args(args).output().unwrap()
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap()
         };
         run(&["init", "-b", "main"]);
         run(&["config", "user.email", "t@t"]);
@@ -203,8 +208,8 @@ mod tests {
     #[test]
     fn status_reports_branch_and_changes() {
         let root = repo("status");
-        std::fs::write(root.join("a.txt"), b"two").unwrap();   // M
-        std::fs::write(root.join("b.txt"), b"new").unwrap();    // ??
+        std::fs::write(root.join("a.txt"), b"two").unwrap(); // M
+        std::fs::write(root.join("b.txt"), b"new").unwrap(); // ??
         let s = status(&root).unwrap();
         assert_eq!(s.branch, "main");
         assert!(s.files.iter().any(|f| f.path == "a.txt" && f.status == 'M'));
@@ -223,7 +228,12 @@ mod tests {
     #[test]
     fn branches_lists_current_first_then_others() {
         let root = repo("branches");
-        Command::new("git").arg("-C").arg(&root).args(["branch", "feature"]).output().unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["branch", "feature"])
+            .output()
+            .unwrap();
         let bs = branches(&root);
         assert_eq!(bs[0], "main");
         assert!(bs.contains(&"feature".to_string()));

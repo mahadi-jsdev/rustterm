@@ -52,9 +52,12 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| "project".to_string());
         app.projects.push(Project::new(name, root.clone()));
     }
-    app.ensure_files();
 
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    // A terminal reporting 0x0 (some PTYs/embedded hosts) panics vt100's
+    // grid math — clamp to a sane floor.
+    let (cols, rows) = crossterm::terminal::size()
+        .map(|(c, r)| (c.max(2), r.max(2)))
+        .unwrap_or((80, 24));
     // Only the first project gets an initial pane; others spawn on activation.
     if let Some(first) = roots.first() {
         let first_pane = Pane::spawn(

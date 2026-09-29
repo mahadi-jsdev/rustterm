@@ -14,7 +14,6 @@ const VERSION: u32 = 1;
 pub struct Session {
     pub version: u32,
     pub active_project: usize,
-    pub sidebar_visible: bool,
     pub projects: Vec<SessionProject>,
 }
 
@@ -42,7 +41,6 @@ pub fn capture(app: &App) -> Session {
     Session {
         version: VERSION,
         active_project: app.active_project,
-        sidebar_visible: app.sidebar_visible,
         projects: app
             .projects
             .iter()
@@ -152,13 +150,11 @@ mod tests {
     #[test]
     fn round_trip_preserves_structure() {
         let mut app = app_fixture();
-        app.sidebar_visible = false;
         app.spawn_pane(None);
         app.spawn_pane(None);
         app.active_project_mut().unwrap().panes[1].hidden = true;
         app.active_project_mut().unwrap().panes[0].title = "api".into();
-        app.active_project_mut().unwrap().panes[0].color =
-            Some(Color::Rgb(0xff, 0xb2, 0x38));
+        app.active_project_mut().unwrap().panes[0].color = Some(Color::Rgb(0xff, 0xb2, 0x38));
         app.active_project_mut().unwrap().col_split = 0.3;
         app.active_project_mut().unwrap().active_pane = 0;
 
@@ -166,17 +162,13 @@ mod tests {
         let s: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(s.version, VERSION);
         assert_eq!(s.active_project, 0);
-        assert!(!s.sidebar_visible);
         assert_eq!(s.projects.len(), 2);
         assert_eq!(s.projects[0].name, "one");
         assert_eq!(s.projects[0].panes.len(), 2);
         assert!(!s.projects[0].panes[0].hidden);
         assert!(s.projects[0].panes[1].hidden);
         assert_eq!(s.projects[0].panes[0].title, "api");
-        assert_eq!(
-            s.projects[0].panes[0].color.as_deref(),
-            Some("ffb238")
-        );
+        assert_eq!(s.projects[0].panes[0].color.as_deref(), Some("ffb238"));
         assert!((s.projects[0].col_split - 0.3).abs() < f32::EPSILON);
     }
 
@@ -211,7 +203,6 @@ mod tests {
         let s = Session {
             version: 99,
             active_project: 0,
-            sidebar_visible: true,
             projects: vec![SessionProject {
                 name: "x".into(),
                 root: PathBuf::from("/tmp"),
@@ -227,7 +218,6 @@ mod tests {
         let s = Session {
             version: VERSION,
             active_project: s.active_project,
-            sidebar_visible: s.sidebar_visible,
             projects: vec![],
         };
         std::fs::write(&path, serde_json::to_string(&s).unwrap()).unwrap();

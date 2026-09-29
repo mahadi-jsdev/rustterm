@@ -1,6 +1,6 @@
-//! Lazy file tree for the sidebar's Files panel — one `read_dir` per
+//! Lazy file tree for the Files panel overlay — one `read_dir` per
 //! expand, dirs sorted before files, no recursion until asked.
-//! Selection lives with the caller (`App::sidebar_sel`); methods take
+//! Selection lives with the caller (`App::panel_sel`); methods take
 //! and return row indices.
 
 use std::path::{Path, PathBuf};
@@ -93,7 +93,11 @@ impl FileTree {
 }
 
 fn read_children(dir: &Path, depth: usize, show_hidden: bool) -> Vec<FileRow> {
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+    // Sort keys are computed ONCE per entry — calling `is_dir()` inside
+    // the comparator syscalls per comparison, and an entry vanishing
+    // mid-sort (busy dirs like /tmp) would flip its key and break the
+    // total order → Rust's sort panics.
+    let mut rows: Vec<FileRow> = std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()
                 .map(|e| e.path())
@@ -105,27 +109,30 @@ fn read_children(dir: &Path, depth: usize, show_hidden: bool) -> Vec<FileRow> {
                             .map(|n| !n.to_string_lossy().starts_with('.'))
                             .unwrap_or(true)
                 })
+                .map(|path| FileRow {
+                    is_dir: path.is_dir(),
+                    path,
+                    depth,
+                    expanded: false,
+                })
                 .collect()
         })
         .unwrap_or_default();
     // Dirs first, then alphabetical — case-insensitive like most
     // graphical file managers.
-    paths.sort_by(|a, b| {
-        b.is_dir().cmp(&a.is_dir()).then_with(|| {
-            a.file_name()
+    rows.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then_with(|| {
+            a.path
+                .file_name()
                 .map(|n| n.to_string_lossy().to_lowercase())
-                .cmp(&b.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+                .cmp(
+                    &b.path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_lowercase()),
+                )
         })
     });
-    paths
-        .into_iter()
-        .map(|path| FileRow {
-            is_dir: path.is_dir(),
-            path,
-            depth,
-            expanded: false,
-        })
-        .collect()
+    rows
 }
 
 #[cfg(test)]
